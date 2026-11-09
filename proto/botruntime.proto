@@ -1,0 +1,66 @@
+syntax = "proto3";
+package nexus.v1;
+
+option go_package = "github.com/888xiyan/NexusCore/proto/gen/v1";
+
+// Bot↔Kernel 控制面（见内核 MVP 详设 5.1 / 架构总结 5.4）。
+service BotRuntime {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
+  rpc StreamTasks(StreamTasksRequest) returns (stream TaskAssignment);
+  rpc AckTask(AckTaskRequest) returns (AckTaskResponse);
+  rpc SubscribeEvents(SubscribeRequest) returns (stream Event);
+  rpc RenewCredential(RenewRequest) returns (RenewResponse);
+  rpc Deregister(DeregisterRequest) returns (DeregisterResponse);
+}
+
+message RegisterRequest {
+  string bot_id = 1;
+  string manifest_digest = 2;
+  repeated string capabilities = 3;
+}
+message RegisterResponse {
+  string token = 1;
+  int64 ttl_seconds = 2;
+}
+message HeartbeatRequest {
+  string bot_id = 1;
+  repeated string job_lease_tokens = 2;
+}
+message HeartbeatResponse {}
+message StreamTasksRequest {
+  string consumer_group = 1;
+}
+message TaskAssignment {
+  string job_id = 1;
+  string lease_token = 2;
+  string payload_ref = 3;
+  string causal_context_json = 4;
+}
+message AckTaskRequest {
+  string job_id = 1;
+  string lease_token = 2;
+  string result_ref = 3;
+}
+message AckTaskResponse {}
+message SubscribeRequest {
+  string consumer_group = 1;
+  repeated string event_types = 2;
+}
+message Event {
+  string event_id = 1;
+  string event_type = 2;
+  string payload_ref = 3;
+  string correlation_id = 4;
+}
+message RenewRequest {
+  string token = 1;
+}
+message RenewResponse {
+  string token = 1;
+  int64 ttl_seconds = 2;
+}
+message DeregisterRequest {
+  string bot_id = 1;
+}
+message DeregisterResponse {}
