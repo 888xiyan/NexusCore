@@ -1,0 +1,93 @@
+11.03 10:52
+当功能清单膨胀到包含 Obsidian 双链笔记、项目管理（PM）、IM 聊天软件接入、Bot 管理、内置浏览器、VS Code 嵌入、跨设备 Agent 时，如果把它们全写进核心代码库，这个项目不出一个月就会变成无法维护的“巨石怪兽（Monolith）”。
+破局的唯一法则，是像 Linux 内核 或 VS Code 本身 一样设计你的底座：核心（Kernel）对具体业务“一无所知”，只提供底层的状态存储、事件总线和协议路由；所有具体功能全部降级为平等的“插件（Plugins）”。
+以下是为你量身定制的 “微内核 + 万物皆插件” 终极架构拆分方案：
+一、 黄金分割线：到底什么是“内核”，什么是“插件”？
+判断一个功能该不该进内核，只需问一个问题：“如果我把 Obsidian 笔记和项目管理全删了，剩下的东西还能不能独立运行？”
+1. 绝对微内核（The Kernel —— 永远不超过 2000 行代码）
+内核不写任何一句跟“笔记怎么渲染”、“看板怎么拖拽”、“Telegram 怎么发消息”相关的代码。它只包含 四大原语（Primitives）：
+ * 统一图谱与文档存储引擎（Universal Graph & Blob Store）
+   * 核心洞察：Obsidian 的 [[双链笔记]]、Bot 的 记忆节点、项目管理的 Task 依赖关系，在数学本质上完全是同一种东西——全都是带属性的节点（Nodes）和有向边（Edges）！
+   * 内核的 MySQL 只需要一张通用实体表（entities）和一张通用关系表（relations），通过 namespace 字段区分它是 Bot 记忆、Markdown 笔记还是项目工单。
+ * 多模态事件与消息总线（Event & Message Bus）
+   * 内核维护一个基于 WebSocket / gRPC 的发布订阅中心（Pub/Sub）。任何插件都可以向总线广播事件（如 note.updated、browser.annotated、task.completed），也可以订阅感兴趣的事件。
+ * Bot 运行时与身份注册中心（Bot Registry & Runtime）
+   * 你的“Bot 管理系统”在内核层只是一个配置注册表：管理每个 Bot 的 bot_id、System Prompt、绑定的模型（云端 API 或本地 Ollama）、挂载的记忆命名空间，以及它被允许调用的插件权限（RBAC）。
+ * 跨设备 RPC 路由网关（Mesh Router）
+   * 维护远程机器连接池，把任意插件发起的 tool.invoke 请求路由到对应的物理机执行。
+2. 插件生态层（The Plugins —— 按需插拔、独立演进）
+所有的业务功能，全部通过一套标准的 Plugin Manifest（插件清单） 挂载到内核上，分为三类插件：
+| 插件分类 | 对应你的功能模块 | 本质职责（它对内核做什么？） |
+|---|---|---|
+| 入站通道插件
+(Ingress Connectors) | 聊天软件 Bot（QQ/TG/Discord/飞书）、VS Code 插件、内置批注浏览器 | 将外部世界的交互（群聊消息、代码划词、网页批注）翻译成标准的 ContextEnvelope，丢进内核总线；并把内核的回复渲染回原处。 |
+| 工作台视图插件
+(Workspace Apps) | Obsidian 双链笔记、项目管理看板、记忆力导向图、Bot 管理后台 | 纯粹的前端 UI 视图 + 专属读写逻辑。它们都在读写内核的同一套 MySQL 图谱表，只是渲染形态不同（一个渲染成 Markdown 编辑器，一个渲染成 Kanban 卡片）。 |
+| 执行器插件
+(Capability Nodes) | 跨设备 Agent 探针、本地沙盒执行器、数据库查询工具 | 挂在内核底部的“手和脚”，监听内核下发的 tool.invoke 指令并返回执行结果。 |
+二、 最精妙的设计：如何用一套底层数据打通“笔记 + 记忆 + 项目管理”？
+如果你把 Obsidian 笔记做成一套表，Bot 记忆做成另一套表，项目管理又做成第三套表，它们之间就永远是割裂的。在微内核架构下，它们在 MySQL 里共享同一套通用图谱底座（Unified Knowledge Graph）：
+-- 内核唯一的通用节点表：万物皆 Entity
+CREATE TABLE kernel_entities (
+    entity_id VARCHAR(64) PRIMARY KEY,
+    namespace ENUM('bot_memory', 'obsidian_note', 'pm_task', 'web_clip') NOT NULL,
+    owner_bot_id VARCHAR(64) DEFAULT 'global', -- 归属哪个Bot，或全局共享
+    title VARCHAR(512) NOT NULL,
+    content LONGTEXT,                          -- Markdown 正文 / 任务描述 / 记忆摘要
+    metadata JSON,                             -- 插件自定义扩展字段（如 PM 的 status/priority，浏览器的 XPath）
+    embedding VECTOR(1536),                    -- 统一向量检索
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+);
+-- 内核唯一的通用边表：万物皆可相连
+CREATE TABLE kernel_relations (
+    relation_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    source_id VARCHAR(64) NOT NULL,
+    target_id VARCHAR(64) NOT NULL,
+    relation_type VARCHAR(64) NOT NULL,        -- 'wikilink' (双链), 'remembers' (记忆), 'blocks' (任务阻塞), 'annotated_from' (批注溯源)
+    weight DOUBLE DEFAULT 1.0,
+    INDEX idx_graph (source_id, target_id, relation_type)
+);
+这样设计带来的“化学反应”是颠覆性的：
+ * Obsidian 插件与记忆无缝融合：你在类 Obsidian 笔记里写下 [[分布式锁实现方案]]，这不仅是一篇笔记，它在底层直接作为 kernel_entities 的一个节点，自动出现在 Bot 的记忆可视化图谱中！Bot 在回答问题时，天然就能顺着双链 wikilink 读到你的私人笔记。
+ * 浏览器批注直接转项目 Task：你在内置浏览器批注了一段开源项目的 Bug 分析，指令写 @pm-bot 创建修复任务。项目管理插件监听到该指令，直接在 kernel_entities 插入一条 namespace = 'pm_task' 的记录，并用 annotated_from 边连接到那条网页批注。
+ * 聊天软件随时随地操控全局：你在外面吃烤肉时，打开手机上的 Telegram / QQ 聊天 Bot 发一句：“帮我看看今天项目看板里还剩几个高优 Task，顺便让家里的服务器把测试跑了。” 聊天插件把消息推进内核，PM 插件返回任务列表，跨设备 Agent 插件唤醒家里机器跑完测试，最后统一由聊天插件发回你的手机。
+三、 插件接入协议：如何让写一个新插件像搭积木一样简单？
+为了让未来的你自己能随时“灵光一现就加个新功能”而不破坏内核，内核只对外暴露一套极简的 微内核插件接口（IPC / WebSocket JSON-RPC）。
+任何插件（无论是用 Python 写的聊天 Bot 桥接器，还是用 React 写的笔记面板）只需在启动时向内核发送一份注册声明：
+{
+  "plugin_id": "plugin-obsidian-vault",
+  "plugin_type": "workspace_app",
+  "subscribes": ["event.memory.created", "event.browser.annotated"],
+  "provides_tools": [
+    {
+      "name": "note.append_daily",
+      "description": "向今日日记追加一段 Markdown 笔记与双链",
+      "parameters": {"content": "string", "tags": "array"}
+    }
+  ],
+  "ui_mount": {
+    "slot": "main_tab",
+    "title": "知识库 (Vault)",
+    "entry_url": "http://localhost:3001/obsidian-view.js"
+  }
+}
+ * 后端插件化（Event + Tool 钩子）：
+   * 当你写 “聊天软件 Bot 插件” 时，它只是一个独立运行的进程（比如用了 nonebot 或 grammY），通过 WebSocket 连上内核，订阅 bot.reply 事件，把消息转发给微信/QQ/Telegram。内核根本不需要引入任何第三方 IM 的 SDK。
+ * 前端插件化（Slot 插槽机制）：
+   * 桌面工作台（Tauri）主界面只提供一个左侧图标栏（Activity Bar，就像 VS Code 最左边那一排图标）和一个主视口容器。
+   * 记忆图谱、内置浏览器、Obsidian 笔记、项目管理看板、Bot 管理面板，全都是挂载在左侧栏的独立前端模块（共用一套 Zustand/Redux 状态和内核 API SDK）。
+四、 重新排定的“微内核 + 插件”落地路线图
+既然确立了核心与插件分离，你现在的开发顺序就非常清晰且毫无心理负担了——先铸造稳如泰山的铁打内核，再一个个挂上流水的插件：
+ * Step 0：铸造微内核（Kernel Core）
+   * 实现 MySQL 的 kernel_entities + kernel_relations + bots 三张核心表。
+   * 实现内核网关：支持插件注册、事件广播（Event Bus）、跨设备 RPC 转发。
+ * Step 1：第一个管理插件 —— Bot Manager Plugin
+   * 先能创建不同的 Bot（例如：架构师Bot、笔记整理Bot、项目管家Bot），配置它们的 API Key、Prompt 和工具权限。
+ * Step 2：双核心视图插件 —— Graph Visualizer & Obsidian Note Plugin
+   * 因为底层共用同一张图谱表，你可以同时做出 Markdown 双链编辑器和力导向图可视化：写一篇带 [[双链]] 的笔记，图谱上立刻长出节点；并且支持双向同步到本地磁盘的 .md 文件夹（完美兼容你现有的 Obsidian 习惯）。
+ * Step 3：上下文捕获插件 —— Annotated Browser & VS Code Extension
+   * 将网页批注和代码批注作为标准事件推入内核，自动转化为笔记节点或 Bot 记忆。
+ * Step 4：扩展外延插件 —— Project Kanban Plugin & IM Chat Connectors & Remote Agent Daemon
+   * 随时按需编写，挂上去就能直接调取前面所有模块的数据。
+如果认可这套 “万物皆图谱节点（Unified Graph） + 万物皆 WebSocket 插件” 的内核拆分哲学，我们下一步可以先聚焦在最关键的 Step 0（微内核底座）：要不要先帮你把 内核的插件注册协议、事件总线分发机制，以及支持笔记/记忆/任务三合一的 MySQL 核心读写层 的完整代码框架敲定下来？
+

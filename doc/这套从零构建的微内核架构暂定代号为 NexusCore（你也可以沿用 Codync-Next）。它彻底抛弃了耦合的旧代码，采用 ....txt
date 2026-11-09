@@ -1,0 +1,156 @@
+11.03 10:47
+这套从零构建的微内核架构暂定代号为 NexusCore（你也可以沿用 Codync-Next）。它彻底抛弃了耦合的旧代码，采用 “Go 高并发通信网关 + Python 记忆认知引擎 + TypeScript 多端视图（Tauri 浏览器 & VS Code）” 的黄金组合，实现跨设备算力调度与全场景记忆捕获。
+一、 系统全景架构与目录结构 (Monorepo)
+系统核心遵循 Hub-and-Spoke（中心辐射型） 拓扑。所有的浏览器页面、VS Code 窗口、远程 Linux 容器都只是一根插在中心总线上的 WebSocket 探针。
+nexus-core/
+├── hub/                        # [Go] 核心微内核网关 (WebSocket 路由 / 连接池 / 鉴权)
+│   ├── cmd/server/main.go
+│   ├── internal/mesh/          # 跨设备节点注册表与 JSON-RPC 路由器
+│   └── internal/store/         # MySQL 基础 CRUD 与事务控制
+├── memory-worker/              # [Python] 异步记忆认知引擎 (LLM 实体抽取 / 向量化)
+│   ├── extractor.py            # 将原始对话/批注转化为 Nodes & Edges
+│   └── embedder.py             # 调用 Embedding 模型写入 MySQL Vector
+├── agent-daemon/               # [Go/Python] 跨设备轻量级探针 (编译为单文件部署在各机器)
+│   ├── main.go                 # 维持反向 WS 隧道、心跳上报、本地 Shell/Docker 执行
+│   └── tools/                  # 本地工具集声明 (MCP 兼容格式)
+├── workbench-app/              # [Tauri + React + TS] 桌面主控台
+│   ├── src/components/Graph/   # Cytoscape.js / Force-Graph 记忆可视化面板
+│   ├── src/components/Browser/ # 内置批注浏览器容器 + 注入脚本 (Content Script)
+└── vscode-ext/                 # [TypeScript] VS Code 原生插件
+    ├── src/extension.ts        # 状态同步、LSP 报错监听
+    └── src/commentController.ts# 原生代码行内批注 (@bot 交互)
+二、 核心数据契约：统一上下文信封 (ContextEnvelope)
+无论是浏览器划词批注、VS Code 选中代码提问，还是远程 Agent 执行完脚本回报结果，进入底座的数据结构完全统一：
+{
+  "envelope_id": "uuid-v4",
+  "bot_id": "architect-bot-01",
+  "source_device": "macbook-pro-local",
+  "source_type": "browser_annotation | vscode_inline | terminal_output",
+  "uri": "https://raft.github.io/raft.pdf",
+  "anchor": {
+    "type": "dom_quote | code_range",
+    "exact": "Leader election timeout randomized between 150ms and 300ms",
+    "prefix": "split votes are resolved by ",
+    "suffix": " to prevent simultaneous candidacy.",
+    "line_start": 42,
+    "line_end": 48
+  },
+  "user_instruction": "@bot 记下这个超时区间，回头写分布式锁心跳检测时要用",
+  "timestamp": 1762137900
+}
+三、 功能一：MySQL 记忆持久化与可视化图谱设计
+为了避免额外部署图数据库（Neo4j）和专用向量库（Milvus）带来的运维负担，直接使用 MySQL 9.0+（原生支持 VECTOR 数据类型与 JSON 索引），单库搞定关系、图谱与语义检索。
+1. 核心数据库 Schema (schema.sql)
+-- 1. Bot 实例表：隔离不同角色的系统提示词与记忆空间
+CREATE TABLE bots (
+    bot_id VARCHAR(64) PRIMARY KEY,
+    name VARCHAR(128) NOT NULL,
+    role_prompt TEXT,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+-- 2. 情景记忆流水表 (Episodic Memory)：保存原始上下文与网页/代码批注锚点
+CREATE TABLE memory_episodes (
+    episode_id VARCHAR(64) PRIMARY KEY,
+    bot_id VARCHAR(64) NOT NULL,
+    source_type ENUM('chat', 'browser_note', 'vscode_note', 'agent_exec') NOT NULL,
+    uri VARCHAR(1024),                    -- 网页 URL 或 代码文件相对路径
+    anchor_json JSON,                     -- DOM XPath/TextQuote 或 代码行号区间
+    raw_content TEXT NOT NULL,            -- 划选的原文或代码片段
+    user_note TEXT,                       -- 用户的批注或提问
+    bot_reflection TEXT,                  -- Bot 当时的回复或总结
+    embedding VECTOR(1536),               -- MySQL 9.0 原生向量字段 (或用 JSON 存并在应用层算余弦)
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    INDEX idx_bot_uri (bot_id, uri(255))
+);
+-- 3. 语义图谱节点表 (Semantic Nodes)：由 LLM 从流水中异步提炼出的核心概念
+CREATE TABLE memory_nodes (
+    node_id VARCHAR(64) PRIMARY KEY,
+    bot_id VARCHAR(64) NOT NULL,
+    label VARCHAR(255) NOT NULL,          -- 如: "Raft 选举超时", "Redis Redlock"
+    category VARCHAR(64),                 -- 如: "Algorithm", "BugRecord", "Preference"
+    summary TEXT,                         -- 该知识点的动态聚合摘要
+    weight DOUBLE DEFAULT 1.0,            -- 记忆权重（每次被唤醒 +0.2，随时间衰减）
+    source_episode_id VARCHAR(64),        -- 溯源到哪次批注产生的
+    updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+    UNIQUE KEY uk_bot_label (bot_id, label)
+);
+-- 4. 语义图谱关系边表 (Semantic Edges)：构建可视化拓扑网
+CREATE TABLE memory_edges (
+    edge_id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    bot_id VARCHAR(64) NOT NULL,
+    source_node_id VARCHAR(64) NOT NULL,
+    target_node_id VARCHAR(64) NOT NULL,
+    relation VARCHAR(128) NOT NULL,       -- 如: "depends_on", "contradicts", "implemented_in"
+    weight DOUBLE DEFAULT 1.0,
+    INDEX idx_bot_graph (bot_id, source_node_id, target_node_id)
+);
+2. 记忆可视化与“外科手术”面板
+ * 力导向图渲染：前端请求 GET /api/memory/graph?bot_id=xxx，直接拉取 memory_nodes 和 memory_edges 塞入 react-force-graph-2d。
+ * 动态呼吸效果：当某台设备的 Agent 正在检索某条记忆时，Hub 通过 WebSocket 发送 MEMORY_HIT 事件，图谱上对应的节点瞬间高亮放大并向外扩散脉冲波。
+ * 双击修改/抹除：双击节点直接弹窗展示关联的 memory_episodes（包含当时批注的网页链接和原文），你可以手动修改 summary 或点击 Delete 物理删除，彻底解决 AI 记忆污染问题。
+四、 功能二：跨设备 Agent 接入与算力网格 (Agent Mesh)
+不需要复杂的服务发现框架，基于 反向 WebSocket 隧道 + JSON-RPC 2.0 即可穿透校园网/家庭 NAT，把你的云服务器、本地台式机、Docker 沙盒串成一个算力池。
+1. 通信协议设计 (JSON-RPC over WebSocket)
+ * 阶段一：设备上线注册 (node.register)
+   子设备启动 agent-daemon 后连接 wss://[your-hub.com/ws/node](https://your-hub.com/ws/node)，第一帧发送能力清单（Manifest）：
+   {
+  "jsonrpc": "2.0",
+  "method": "node.register",
+  "params": {
+    "device_id": "homelab-gpu-server",
+    "auth_token": "secret-jwt-token",
+    "os": "linux-ubuntu-24.04",
+    "capabilities": [
+      {"name": "bash_sandbox", "desc": "在隔离 Docker 容器中执行 Linux 命令"},
+      {"name": "local_llm_infer", "desc": "调用本地双卡显卡运行 Ollama 推理"}
+    ]
+  }
+}
+ * 阶段二：跨设备远程调用 (tool.invoke)
+   当你在笔记本的 VS Code 里让 Bot “去我的服务器跑一下压测脚本”，中心 Hub 查找路由表，将指令精准推给 homelab-gpu-server 的 WebSocket 连接：
+   {
+  "jsonrpc": "2.0",
+  "id": "req-9981",
+  "method": "tool.invoke",
+  "params": {
+    "tool_name": "bash_sandbox",
+    "arguments": {"cmd": "wrk -t12 -c400 -d30s http://127.0.0.1:8080/api"}
+  }
+}
+ * 阶段三：流式回传 (tool.stream)
+   远程节点执行命令时，将 stdout/stderr 实时打包推送回 Hub，Hub 同步转发到你的 VS Code 面板或浏览器终端里。
+五、 功能三：内置批注浏览器 (Annotated Browser)
+使用 Tauri 2.0（或 Electron）作为桌面工作台宿主，利用多 Webview 实例管理功能：左侧是你的记忆图谱与聊天主控，右侧是内嵌的网页浏览器。
+1. 划词捕获与抗变动锚点（Selector 生成）
+当右侧浏览器加载任何网页完成时，宿主自动注入一段 100 行的 annotator.js：
+ * 监听 mouseup 事件，一旦检测到用户划选文字，在鼠标旁浮现极简工具条：[高亮] [写批注 @Bot]。
+ * 双重定位策略（防止网页改版后找不到位置）：
+   同时记录 DOM XPath 与 TextQuoteSelector（记录选中文本 exact，以及它前面的 32 个字符 prefix 和后面的 32 个字符 suffix）。即便网页广告位变动导致 DOM 树偏移，依然能通过前后文字符精准匹配还原。
+2. 历史批注自动重现（Hydration）
+ * 每当内置浏览器跳转到新 URL（如一篇技术博客），注入脚本立即请求本地 Hub：GET /api/memory/annotations?uri=当前URL。
+ * 拿到该网页关联的所有 memory_episodes 后，脚本遍历页面 TextNode，匹配 exact + prefix/suffix，自动用 <mark class="nexus-highlight"> 标签包裹原文，并在右侧边缘渲染出你当初写的批注卡片和 Bot 的延伸思考。
+六、 功能四：VS Code 原生深度嵌入
+不搞反人类的独立大弹窗，只用 VS Code 最优雅的两个原生 API 挂载你的系统：
+1. 原生行内批注控制器 (vscode.comments API)
+ * 注册一个 CommentController，每当你在代码编辑器任意行号左侧点击 + 号（就像在 GitHub PR 里做 Code Review 一样），直接拉起原生评论框。
+ * 输入：@bot 这里并发读写 map 会 panic 吗？顺便把这段记入当前项目的踩坑记录。
+ * 插件捕获当前文件路径、选中行号区间（line_start ~ line_end）、当前函数的 AST 文本，封装成 ContextEnvelope 发往 Hub。
+ * 代码批注持久化：这段评论不会随着文件关闭而消失。因为它的 uri 和行号存在了 MySQL 的 memory_episodes 表里，下次打开这个文件，插件自动拉取历史记忆，在对应代码行展开折叠的记忆卡片。
+2. 跨端丝滑联动（Browser \leftrightarrow VS Code）
+ * 共享同一颗大脑：你在【内置浏览器】里看完了某篇论文或开源文档，划词批注了 3 个核心公式。
+ * 切回【VS Code】写代码时，只需在注释里写一句：// @bot 按照我刚在浏览器里批注的公式实现这个加权算法。
+ * VS Code 插件请求 Hub -> Hub 从 MySQL memory_episodes 中捞出 1 分钟前 source_type = 'browser_note' 的最新记录 -> 拼装进 Prompt -> 直接在编辑器里通过原生 Diff 视图生成代码。
+七、 最小可行性版本（MVP）14 天破局路线图
+为了防止战线拉太长产生疲惫感，按以下 4 个里程碑推进，每一步都有立竿见影的视觉反馈：
+ * Day 1 - 3：立起微内核与 MySQL 底座
+   * 建好上述 4 张 MySQL 表。
+   * 用 Go 或 Python (FastAPI) 写一个 300 行的 Hub 服务，提供两个接口：POST /api/envelope（接收信封存入 memory_episodes，并用后台协程调一次 LLM 提取实体写入 nodes/edges）和 GET /api/graph（返回图谱 JSON）。
+ * Day 4 - 6：跑通跨设备 WebSocket 探针
+   * 在 Hub 里加上 /ws/node 路由，用内存 Map 维护在线设备。
+   * 写一个 agent.py 脚本放在你的云服务器或 Docker 容器里连上来，实现通过 Postman 发请求就能让远程机器执行 ls -la 并拿回结果。
+ * Day 7 - 10：桌面工作台（图谱 + 批注浏览器）
+   * 起一个 React + Vite 前端（先用纯 Web 或 Electron/Tauri 包装），左边放 react-force-graph 渲染 MySQL 里的节点，右边放一个 iframe / webview，写好 mouseup 划词弹窗发给 POST /api/envelope。这时候你已经能看到“网页划词批注 \rightarrow 左侧记忆图谱实时长出新节点”的酷炫效果。
+ * Day 11 - 14：VS Code 插件接入
+   * 用 yo code 生成插件骨架，接入 CommentController API，把代码行内评论也发往同一个 /api/envelope 接口，完成全链路闭环。
+要不要我现在直接把 Day 1-3 的核心底座代码（包含 MySQL 建表、统一信封接收接口、LLM 自动抽取出图谱节点的完整后端实现） 写出来，你直接复制到本地就能跑通第一个闭环？
+
