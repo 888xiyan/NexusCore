@@ -9,6 +9,7 @@
 | [doc/NexusCore架构设计总结.md](doc/NexusCore架构设计总结.md) | 上游总设计：原则、架构图、队列语义、记忆模型、数据模型、结论与修订记录 |
 | [doc/内核mvp/](doc/内核mvp/内核MVP详细设计.md) | 内核 MVP 实现级详细设计（10 模块、双库数据模型、接口契约、验收标准） |
 | [doc/BotMvp/](doc/BotMvp/BotMvp详细设计.md) | Bot MVP 实现级详细设计（内核侧四角色、插件侧业务 Bot、监督与安全审查链路） |
+| [doc/PluginMvp/](doc/PluginMvp/PluginMvp详细设计.md) | Plugin MVP 实现级详细设计（三类插件、manifest schema、生命周期六态、命名规范） |
 | [doc/开发规划.md](doc/开发规划.md) | 单人开发整体规划（M0-M7 里程碑、估计、停线点、砍单策略） |
 | [doc/NexusCore待修正问题清单.md](doc/NexusCore待修正问题清单.md) | 未解决问题追踪（D-04 / D-11 / D-12） |
 | [doc/NexusCore已修正问题归档.md](doc/NexusCore已修正问题归档.md) | 已解决问题归档（D-01 至 D-03、D-05 至 D-10、D-13 至 D-19） |

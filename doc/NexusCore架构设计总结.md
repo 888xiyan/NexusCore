@@ -1213,3 +1213,4 @@ Bot 运行边界同样不可侵蚀：Bot 不是 hub 内嵌协程，而是内核�
 | 2026-11-09 | 新增 `doc/开发规划.md`：单人开发整体规划（M0-M7 里程碑、估计 85-120 人日、停线点与砍单顺序、质量实践、风险对策；绑定既有验收清单）。 | `doc/开发规划.md` |
 | 2026-11-10 | 落实 D-20：新增 3.3.1 Bot 角色体系——内核侧四角色（`user_bot / create_bot / monitor_bot / security_bot`）与插件侧业务 Bot（`xxx_bot / user_xxx_bot`）；插件注册 Bot、`create_bot` 读清单拉进程、`monitor_bot` 监督存续、`security_bot` 负责插件注册与热更新审查；3.1 原语 3 与 Step 1 同步。 | `NexusCore设计缺陷评审.md` D-20 |
 | 2026-11-10 | 新增 `doc/BotMvp/`：Bot MVP 实现级详细设计（内核侧四角色 / 插件侧 Bot 部署形态与生命周期、create_bot 决策面、monitor_bot 扫描、security_bot 审查与热更新、数据模型扩展、冒烟与验收标准）。本文档继续作为上游总设计。 | `doc/BotMvp/BotMvp详细设计.md` |
+| 2026-11-10 | 新增 `doc/PluginMvp/`：Plugin MVP 实现级详细设计（三类插件形态、manifest schema 冻结、命名与事件规范（G1 收口）、生命周期六态、数据迁移与卸载清理（G4/G5 最小解）、资源限制（G6）、安全链路、冒烟与验收标准）。本文档继续作为上游总设计。 | `doc/PluginMvp/PluginMvp详细设计.md` |
