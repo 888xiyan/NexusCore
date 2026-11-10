@@ -204,6 +204,7 @@ DeadLetter / Replay(job_id)                 # replay 必经 ResumeConfirmed
 3. `start_timeout` 默认 30s；超时任务回队列，连续 3 次启动失败熔断该 bot_id 并上报 `bot_stalled`。
 4. bot-runtime 启动后立即 `Register`，随后 `SubscribeEvents` + `StreamTasks` 循环；不持有任何本地长期状态。
 5. 崩溃重启指数退避 1s / 2s / 4s…封顶 60s。
+6. 决策 / 执行分离（D-20）：`desired_state` 的修改者**只有** `create_bot`（读 bot 清单 + 插件清单），`supervisor` 是执行器；`user_bot` / `create_bot` / `monitor_bot` / `security_bot` 四个内核角色为预置进程，MVP 阶段 `user_bot` 常驻，其余三个在 Step 1 起常驻；插件侧 `xxx_bot / user_xxx_bot` 的 `desired_state` 来源是其注册的插件清单条目。
 
 ## 4. 数据模型
 

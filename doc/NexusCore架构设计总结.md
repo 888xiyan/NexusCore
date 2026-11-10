@@ -28,7 +28,7 @@ NexusCore 是一个以微内核为基础的个人智能工作台：内核只负�
 
 1. **知识访问与图谱存储**：图谱只承载知识域；物理上分为金库库（个人笔记、全局公理）与记忆库（项目记忆、Bot 记忆、网页摘录），两库统一经 Memory Gateway 访问。PM 任务等强结构业务数据不入图谱，由插件自己的类型化表存储并通过 `entity_id` 引用图谱节点（见 8.1 / 8.4）。
 2. **事件、消息与持久化任务队列**：插件之间通过事件解耦。事件分为两类：正确性相关的持久事件（如 `project.memory.updated`、`task.state.changed`）必须与状态变更同事务写入 Transactional Outbox，再经持久化 Job Table 按 Consumer Group 投递，支持重投与显式 ack；UI 刷新类尽力而为事件可走内存通道，丢失可容忍（见 6.7）。入站消息、Bot 任务、审核任务和 Agent 任务进入持久化队列，支持重试、租约、死信和顺序分区。所有进入内核的消息必须携带完整因果链并通过统一入口校验（见 6.10）。
-3. **Bot 注册与运行时**：维护 Bot 身份、System Prompt、模型绑定、记忆空间和插件权限；内核是 Bot 独立二进制的唯一创建者与监督者，按 `activation_mode`（lazy / resident）激活、健康检查、崩溃重启与回收；lazy Bot 不持有 Bot-Agent 长连接，resident Bot 持有长连接；Bot 通过 gRPC 控制面注册、心跳、拉取任务与订阅事件（见 5.4 / 5.5）。
+3. **Bot 注册与运行时**：维护 Bot 身份、System Prompt、模型绑定、记忆空间和插件权限；内核是 Bot 独立二进制的唯一创建者与监督者，按 `activation_mode`（lazy / resident）激活、健康检查、崩溃重启与回收；Bot 分四角色——内核侧 `user_bot / create_bot / monitor_bot / security_bot`，插件侧 `xxx_bot / user_xxx_bot`（见 3.3.1）；lazy Bot 不持有 Bot-Agent 长连接，resident Bot 持有长连接；Bot 通过 gRPC 控制面注册、心跳、拉取任务与订阅事件（见 5.4 / 5.5）。
 4. **跨设备传输路由**：维护 Agent 节点连接池与原生 TCP/UDP 会话，把工具调用路由到对应设备；内核只负责传输、鉴权、多路复用与背压，应用层协议由插件定义（见 5.1）。
 
 以下强业务语义组件不属于内核，必须外置：
@@ -59,9 +59,29 @@ NexusCore 是一个以微内核为基础的个人智能工作台：内核只负�
 
 | 对象 | 位置 | 是否有长期人格 | 是否有记忆 | 是否执行物理操作 |
 | --- | --- | --- | --- | --- |
-| 用户 | user_bot，常驻席位 | 用户本人 | 全量访问（经网关 ACL） | 经客户端插件投递 / 消费消息 |
-| Bot | 内核侧，独立二进制进程，按 lazy / resident 类型激活 | 有 | 有，分角色记忆和项目记忆 | 不直接执行文件或 Shell 操作 |
+| Bot 总类 | 内核侧 + 插件侧 | 按角色 | 按角色 | 不直接 Shell 操作 |
 | Agent Tool | 本地电脑、服务器、Docker、浏览器执行环境 | 无 | 只有任务工作现场 | 提供算力和工具，执行 `bash_exec`、`git_diff` 等 |
+
+### 3.3.1 Bot 角色体系：内核侧与插件侧
+
+Bot 分两类托管：**内核侧**（hub 进程直接持有角色注册表与控制面）与**插件侧**（由安装的插件注册并交由内核纳管）。每个角色一个 bot，命名即角色：
+
+| 角色 | 托管侧 | 职责 | 拉起关系 |
+| --- | --- | --- | --- |
+| `user_bot` | 内核侧 | 用户席位：常驻投递 / 消息代理的挂点、输入裁决和工作台入口 | 内核启动时创建（resident） |
+| `create_bot` | 内核侧 | Bot 工厂：阅读内核的 bot 清单与插件清单，按需**拉起相关 Bot 进程**；负责 lazy/resident 状态机与 drain | 由 `user_bot` 指令拉起（worker 模式） |
+| `monitor_bot` | 内核侧 | 监督者：滚动检查各 Bot 的存续（进程、心跳、租约、Consumer Group 消费位点），超阈走 Health 链路（6.9） | 由 `user_bot` 指令拉起（常驻优先） |
+| `security_bot` | 内核侧 | 插件与 Bot 的安全审查员：**插件注册校验**、插件侧 Bot 注册审查、高危审核（配 3.4）、插件安装后的**热更新安全策略**（隔离运行 + 灰度观察窗） | 常驻；策略只读 + 审计写入 |
+| `xxx_bot`（业务 Bot） | 插件侧 | 业务 bot：命名 `xxx_bot`（如 `architect_bot / pm_bot`）；由承载它的**插件**在安装后向内核注册 bot | 由 `create_bot` 按插件清单拉起 |
+| `user_xxx_bot`（用户自定义 Bot） | 插件侧 | 用户通过该插件的界面 / 配置自建的 bot，命名加 `user_` 前缀（如 `user_writer_bot`）；与 `xxx_bot` 共用插件提供的工具与权限 | 由 `create_bot` 按用户清单拉起，安全审查进 `security_bot` |
+
+规则：
+
+1. **唯一创建者仍是内核**：无论内核侧还是插件侧 Bot，进程都由 `create_bot` 经内核 supervisor 机制（5.5）拉起 / 回收；插件只拥有"注册意愿 + 配置"，不直接 `exec`。
+2. 命名即类型：`user_` 前缀仅表示"用户通过插件自建"，不改变 lazy / resident 语义；`user_bot` 保留名，禁止任何插件注册名为 `user_bot` 或带内核保留前缀（`create_/monitor_/security_`）的 bot。
+3. `security_bot` 与 3.4 的凭证 / ACL 体系配合：插件被批准后先注册 `xxx_bot`（与 3.4 的授权记录互查），用户自建 `user_xxx_bot` 时默认走同一套审查；热更新采用"新进程 drain 旧进程"（同 5.5 升级规则），观察期异常即回滚。
+4. **拉起链路：`user_bot → 内核控制面 → create_bot → 各 Bot`**；`create_bot / monitor_bot` 不接受业务消息，仅响应 `user_bot` 与 Health 链路事件。
+5. 插件侧 Bot 同样只有 gRPC 控制面（5.4）一条接入路径；插件本身不持有 Bot 进程，只登记（插件清单 → bot 清单 → create_bot 拉起）。
 
 统一总线规则：用户以 `user_bot` 身份在总线上（客户端插件只是 user_bot 的投递 / 展示代理）；**只有 bot 能投递与消费消息**，内核是各个 bot 之间的消息通道（每 bot 一个 Consumer Group 即其邮箱）。入口适配器（IM / VS Code / 浏览器 / CLI）代 bot 发信，不允许非 bot 主体直入内核。
 
@@ -1118,7 +1138,7 @@ kernel_external_refs
 | 阶段 | 目标 | 关键交付 |
 | --- | --- | --- |
 | Step 0 | 微内核底座 | `kernel_projects`、`kernel_entities`、`kernel_relations`、金库库 / 记忆库双 schema、Memory Gateway 最小读写接口、插件注册协议（含身份凭证与用户授权订阅，见 3.4）、BotRuntime gRPC 控制面骨架（注册 / 心跳 / 任务流 / 事件订阅，见 5.4）、统一 `IngressEnvelope` 因果校验、`kernel_ingress_log` 与加密上下文快照（见 6.10）、事件总线、持久化 Job Table、Transaction Outbox、最小传输路由（TCP/UDP 会话） |
-| Step 1 | Bot 与队列管理 | 创建 Bot、配置 Prompt 与模型、绑定记忆空间、Bot 二进制制品与内核 supervisor、lazy / resident 双类型生命周期与激活策略（见 5.5）、插件权限授权与载荷 ACL、Health Service 报告入口与聚合窗口（见 6.9）、Consumer Group、重试、租约、DLQ、基础审核事件 |
+| Step 1 | Bot 与队列管理 | 四角色骨架落位（`user_bot` 预置常驻，`create_bot / monitor_bot / security_bot` 工厂与监督链路，见 3.3.1）、业务 Bot 注册（插件侧 `xxx_bot / user_xxx_bot`）、配置 Prompt 与模型、绑定记忆空间、Bot 二进制制品与内核 supervisor、lazy / resident 双类型生命周期与激活策略（见 5.5）、插件权限授权与载荷 ACL、Health Service 报告入口与聚合窗口（见 6.9）、Consumer Group、重试、租约、DLQ、基础审核事件 |
 | Step 2 | 图谱与笔记 | 力导向图、Markdown 双链编辑、本地 `.md` 单向发布 + 变更摄取（见 10.3） |
 | Step 3 | 输入通道 | 批注浏览器、VS Code 行内评论、统一业务载荷 `ContextEnvelope` + 通讯信封 `IngressEnvelope`（含完整因果链，见 6.10 / D-19）入口 |
 | Step 4 | Agent Mesh | 原生 TCP/UDP 会话、传输鉴权、插件协议注册与协商、工具 Manifest、健康上报（继承完整因果链）、流式回传、输出蒸馏、HITL 授权 |
@@ -1191,3 +1211,4 @@ Bot 运行边界同样不可侵蚀：Bot 不是 hub 内嵌协程，而是内核�
 | 2026-11-08 | 新增 `doc/内核mvp/`：内核 MVP 实现级详细设计（10 模块、双库数据模型、gRPC / 网关 / 传输 / replay 人工确认契约、冒烟与验收标准；D-04 四语义并入调度器设计）。本文档继续作为上游总设计。 | `doc/内核mvp/内核MVP详细设计.md` |
 | 2026-11-09 | 落实 D-19：总线统一为 bot 通道——用户以 `user_bot` 身份在总线（常驻席位），客户端插件只是其投递 / 展示代理，只有 bot 能投递与消费消息；6.10 信封收敛为通讯职责（msg_type / from_bot_id / channel 等），业务维度移入载荷，接收 bot 自行拉取 `payload_ref` 并受拉取授权约束；日志表字段同步。 | `NexusCore设计缺陷评审.md` D-19 |
 | 2026-11-09 | 新增 `doc/开发规划.md`：单人开发整体规划（M0-M7 里程碑、估计 85-120 人日、停线点与砍单顺序、质量实践、风险对策；绑定既有验收清单）。 | `doc/开发规划.md` |
+| 2026-11-10 | 落实 D-20：新增 3.3.1 Bot 角色体系——内核侧四角色（`user_bot / create_bot / monitor_bot / security_bot`）与插件侧业务 Bot（`xxx_bot / user_xxx_bot`）；插件注册 Bot、`create_bot` 读清单拉进程、`monitor_bot` 监督存续、`security_bot` 负责插件注册与热更新审查；3.1 原语 3 与 Step 1 同步。 | `NexusCore设计缺陷评审.md` D-20 |
