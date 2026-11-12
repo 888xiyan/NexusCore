@@ -8,7 +8,7 @@
 
 ### 1.1 目标
 
-1. **三类插件形态都可写**：入站通道（连接外网 / IM）、工作台视图（业务数据 UI）、执行器（本地 / 远程工具），通过统一 Manifest 与控制面接入。
+1. **四类插件形态都可写**：入站通道（连接外网 / IM）、工作台视图（业务数据 UI）、执行器（本地 / 远程工具）、知识 / 记忆（如 `plugin_memory`），通过统一 Manifest 与控制面接入。
 2. **命名与事件规范冻结**：`<plugin_prefix>.<domain>.<event>` 规则 + bot 名命名规范，MVP 编译期 enforce（G1 收口）。
 3. **生命周期完整**：install → security_review → approve → activate → upgrade（drain + 切换）→ disable → uninstall，全链路状态机。
 4. **卸载清理规则冻结**：Bot 进程下线、Consumer Group 停订、事件类型反注册、类型化表处理（G4/G5 最小解）。
@@ -33,8 +33,11 @@
 | 入站通道插件 | `cli_ingress_bot`（MVP 最简单）、后续 Telegram / 飞书 / VS Code / 浏览器 |
 | 工作台视图插件 | `obsidian_view_bot`（M3 首发示例）、`knowledge_graph_bot`（M7 前置） |
 | 执行器插件 | `loopback_agent_bot`（M1 冒烟用）、`bash_executor_bot`（M5） |
+| 知识 / 记忆插件 | `plugin_memory`（M3 首发示例，详见 [../MemoryPlugin/MemoryPlugin详细设计.md](../MemoryPlugin/MemoryPlugin详细设计.md)） |
 
 每个插件 = `plugin_id` + `plugin_manifest` + 一个可执行 Go 二进制（optional）+ 类型化数据表（optional）+ 1..N 个 `bot_manifest`（必须有，规则 3.3.1 规则 5）。MVP 生态下"每个插件必须有一个 bot 才存活"是硬条件，杜绝"空插件"。
+
+知识 / 记忆插件与其它类型在接入方式上完全同级：独立二进制、自有 schema、自有账号、自有 manifest 与生命周期；内核不为 `plugin_memory` 保留任何特殊通道或凭据。记忆业务（图谱、金库、晋升、上下文装配）全部是插件内部实现，不属于内核，也不由内核做任何授权或装配。
 
 ## 3. 插件 Manifest Schema（v1 冻结）
 
@@ -42,7 +45,7 @@
 plugin_manifest
 ├── plugin_id           # 规范：^plugin_([a-z0-9_]{3,24})$，示例 plugin_architect
 ├── display_name        # 可读名，仅 UI
-├── plugin_type         # ingress / workspace / executor
+├── plugin_type         # ingress / workspace / executor / knowledge
 ├── version             # semver v1.0.0
 ├── binary              # optional：Go 二进制 file name；工作台视图可空
 ├── binary_digest       # sha256，热更新时校验
@@ -68,6 +71,7 @@ kernel-side roles   : user_bot / create_bot / monitor_bot / security_bot   # res
 plugin-side default : [a-z0-9_]+_bot，由 plugin_id 去前缀 + '_bot'（如 plugin_architect → architect_bot）
 plugin-side custom  : 任意合规命名（见命名规则 4.5）
 user-created        : user_ 前缀 + plugin 侧提供的 bot 简称 + _bot   # user_writer_bot
+                      默认 memory_profile=personal_stack_v1；宿插件不实现记忆引擎
 ```
 
 ### 4.2 event_type 命名
@@ -151,6 +155,7 @@ active / disabled ─upgrade→ security_review 新版本 → approved → 涌�
 2. confirm 模式：bot_manifest 行删除、bot 进程下线、event_registry 反注册、类型化表（若有）整行 DROP、`kernel_plugins` 状态 uninstalled。
 3. keep 模式：bot 进程下线 + registry 反注册，但类型化表保留（数据可用 CLI 读取，或重建插件后恢复）。
 4. `install / upgrade` 不支持从 uninstalled 状态直接激活，须重走 install。
+5. 知识 / 记忆插件（`plugin_memory`）的卸载额外受保护：vault 数据默认强制保留，confirm 删除必须二次确认；卸载后依赖记忆的 Bot 降级为无上下文执行，内核行为不变。
 
 ## 6. 插件进程模型（G2 回收：MVP 单语言，语言无关延后）
 
@@ -159,7 +164,7 @@ MVP 只支持 Go 独立二进制（bot-runtime 执行）。其他语言处理策
 | 语言 | MVP 应对 |
 | --- | --- |
 | Go | 直接在 MVP 起飞：cmd/xxx_bot/main.go 或 plugin binary |
-| Python | 临时方案：通过 Go hub 启一个 `gateway-mem-worker`（stub 替换 MLP 模型） |
+| Python | 临时方案：由 `plugin_memory` 知识服务作子进程拉起 memory-worker（M4；模型先用 stub） |
 | TypeScript / Vue | 无后端，纯 UI（M7 工作台起） |
 
 **规则**：MVP 内所有插件都须 Go 生态可直接编译；非 Go 插件 SDK 推至 M4+，在 SDK 就绪前由"插件进程模型（12.3）"继续开放。
@@ -175,7 +180,7 @@ MVP 只支持 Go 独立二进制（bot-runtime 执行）。其他语言处理策
 
 ### 7.2 无 schema 的插件
 
-使用 Memory Gateway 的 kernel_entities 即可（namespace=plugin_id），不产生 `required_tables[]`。M3 Obsidian 先走这条路。
+使用记忆插件 `plugin_memory` 的 `memory_entities` 即可（namespace=plugin_id），不产生 `required_tables[]`。M3 Obsidian 先走这条路。
 
 ## 8. 资源限制（G6 最小解）
 
@@ -236,5 +241,5 @@ security-revoke <decision_id> <reason>
 | 3.4 / 9 | 3.4 插件信任边界 + BotMvp §4.4 |
 | 4 | 3.3.1 规则 2（保留名） + 新增 |
 | 5 / 11 | BotMvp §8.2 / 8.4 |
-| 7 | 8.4 Memory Gateway / 8.1 namespace 规范 |
+| 7 | 8.4 记忆插件存储边界 / 8.1 namespace 规范 |
 | 10 | 5.1 传输路由 / D-14 插件自定义协议 |

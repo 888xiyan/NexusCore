@@ -8,7 +8,7 @@
 
 ### 1.1 目标
 
-1. 内核启动即预置 `user_bot / monitor_bot / security_bot` 三个 resident 进程与一个懒加载的 `create_bot` worker，均通过 bot-runtime 独立二进制承载（D-17 / D-18 保持）。
+1. 内核启动即预置 `user_bot / monitor_bot / security_bot` 三个 resident 进程与一个懒加载的 `create_bot` worker，均通过 bot-runtime 独立二进制承载（D-17 / D-18 保持）；四角色不持有、不读取任何记忆，其能力不依赖记忆插件是否安装。
 2. `create_bot` 读内核的 Bot 清单与插件清单，按需触发 supervisor 拉起业务 Bot 进程（决策与执行分离，D-20）。
 3. `monitor_bot` 周期扫描 `bot_instances / kernel_jobs`：进程消失、心跳超时、租约过期、Consumer Group 位点停滞四类异常走 6.9 Health 链路与事件总线。
 4. `security_bot` 承担插件注册 / 注册 Bot 审查 / 热更新治理三件事，MVP 通过 CLI 审批（`security-approve / security-list / security-revoke`）。
@@ -57,7 +57,7 @@ user_bot (resident) 收到 CLI `plugin install xxx` / `bot create xxx_user` 指�
                  └─ supervisor exec 一个新的 bot-runtime 进程（binary_digest 校验）
                       └─ 该 bot 进程 `Register` 后 ready
 
-插件的 / 用户创建的 Bot 交付的后续任务使用 5.5 的 lifecycle，水瓶座 / 状态机完全一致（D-17/D-18）。
+插件的 / 用户创建的 Bot 交付的后续任务使用架构总结 5.5 的生命周期状态机，完全一致（D-17/D-18）。
 ```
 
 ## 4. 内核侧四角色
@@ -122,6 +122,7 @@ user_bot (resident) 收到 CLI `plugin install xxx` / `bot create xxx_user` 指�
 1. 命名必须 `user_` 前缀；若宿插件给出模板，默认名从模板生成（可改尾缀）。
 2. `managed_by=plugin_id`，`owner=user_bot`。
 3. 用户 / 插件指令驱动的安全审查流程与 4.4 相同。
+4. 创建时默认写入 `memory_profile=personal_stack_v1`（内核只存储声明、不解释其含义）；宿插件负责提供创建入口和业务工具，不实现记忆引擎。该 profile 的运行时由记忆插件 `plugin_memory` 内的 memory-worker 于 M4 承载，详见[用户级Bot默认个人记忆架构](../MemoryPlugin/用户级Bot默认个人记忆架构.md)。内核侧四角色不使用任何 memory_profile。
 
 ## 6. 数据模型
 
@@ -134,6 +135,8 @@ bot_manifest
 ├── managed_by         # kernel（四角色） / plugin_id（ɵxxx_bot / user_xxx_bot）
 ├── parent_plugin      # 仅插件侧 Bot 有值
 ├── owner              # user_bot  / 空
+├── memory_profile     # personal_stack_v1（默认） / none；插件侧用户自建 Bot 默认启用；
+│                      # 由 plugin_memory 实现，内核仅存储声明、不解释
 └── reserved           # 保留名禁用标记（由 registry 校验）
 ```
 
@@ -151,7 +154,7 @@ bot_instances
 └── last_error
 ```
 
-### 6.3 kernel_security_decisions（memory 库）
+### 6.3 kernel_security_decisions（kernel 库）
 
 ```text
 decision_id             BIGINT PK
@@ -232,9 +235,10 @@ hub exec 起动
 
 ```text
 1. user CLI：bot create user_writer_bot --plugin <id>
-2. security_bot 根据 managed_by=插件 / owner=user_bot 完成审查
-3. create_bot SetDesiredState(start user_writer_bot)
-4. supervisor exec → Register → ready
+2. registry 校验命名并写入 memory_profile=personal_stack_v1
+3. security_bot 根据 managed_by=插件 / owner=user_bot 完成审查
+4. create_bot SetDesiredState(start user_writer_bot)
+5. supervisor exec → Register → ready
 ```
 
 ### 8.4 插件热更新
@@ -264,6 +268,7 @@ hub exec 起动
 5. monitor_bot：人工 kill 某一个 bot-runtime 进程，30s 内收到 `bot_stalled` / `agent.health.changed` 事件。
 6. 验收问题 19 的四问均可将本设计逐条回显。
 7. 集成测试：状态机（Bot lifecycle）与保留名校验通过表驱动用例；审计日志写入覆盖 security 行为。
+8. 用户建 `user_xxx_bot` 后，`bot list` 显示 `memory_profile=personal_stack_v1`（M2 仅声明，运行时归 `plugin_memory`）；普通插件侧 `xxx_bot` 不继承该默认值；内核侧四角色无该字段。
 
 ## 10. 与上游文档的映射
 

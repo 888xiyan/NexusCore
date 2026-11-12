@@ -74,7 +74,7 @@ func Probe(ctx context.Context, db *sql.DB) (int, error) {
 		return 0, err
 	}
 	var n int
-	row := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_name = '_migrations'")
+	row := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_migrations'")
 	if err := row.Scan(&n); err != nil {
 		return 0, fmt.Errorf("读取迁移状态: %w", err)
 	}

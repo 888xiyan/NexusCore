@@ -23,7 +23,7 @@ func main() {
 	flag.Parse()
 
 	if *dsn == "" || *dir == "" {
-		fmt.Fprintln(os.Stderr, "必须提供 -dsn 与 -dir；示例：migrate -cmd probe -dsn \"$MYSQL_MEMORY_DSN\" -dir migrations/memory")
+		fmt.Fprintln(os.Stderr, "必须提供 -dsn 与 -dir；示例：migrate -cmd probe -dsn \"$MYSQL_KERNEL_DSN\" -dir migrations/kernel")
 		os.Exit(2)
 	}
 	listDir := func(d string) ([]string, error) {

@@ -3,7 +3,7 @@
 > 评审时间：2026-11-05  
 > 评审对象：`doc/NexusCore架构设计总结.md`（当前仓库尚无实现代码，本评审针对设计文档）  
 > 评审视角：消息队列 / 中间件工程语义（投递保证、幂等、租约、因果序、崩溃恢复）  
-> 状态：归档于 2026-11-10，共 17 项已修正（D-01 至 D-03、D-05 至 D-10、D-13 至 D-20）  
+> 状态：归档于 2026-11-12，共 19 项已修正（D-01 至 D-03、D-05 至 D-10、D-13 至 D-22）  
 > 未解决的问题见 `NexusCore待修正问题清单.md`
 
 ## 1. 已修正总览
@@ -27,16 +27,19 @@
 | D-18 | P1 | Bot 类型与长连接策略未区分（lazy / resident） | 5.5 / 6.2 / 6.9 | 2026-11-07 |
 | D-19 | P1 | 信封混装业务语义；用户未入总线，非 bot 主体可直接投递 | 3.3 / 6.1 / 6.10 | 2026-11-08 |
 | D-20 | P1 | Bot 未分内核侧 / 插件侧角色体系，工厂 / 监督 / 安全角色缺失 | 3.3.1 / 5.5 / 11 | 2026-11-10 |
+| D-21 | P0 | 知识访问与图谱存储仍被归入 hub 原语，进程与数据库账号边界未拆分 | 3.1 / 4 / 8.4 / 11 | 2026-11-11 |
+| D-22 | P0 | 记忆仍以内核数据面形态存在，内核与内核侧 Bot 被迫携带记忆职责 | 1 / 3.1 / 7 / 8 / 13 | 2026-11-12 |
 
 ## 2. 修正要点速览
 
-1. **内核边界（D-01 / D-14 / D-15）**：Arbiter/Assembler/深度审核外置；hub 收敛为存储、队列、路由、注册四类原语；Bot↔Agent 只传 TCP/UDP 帧，Bot↔Kernel 走 gRPC 控制面。
+1. **内核边界（D-01 / D-14 / D-15 / D-21 / D-22）**：Arbiter/Assembler/深度审核外置；记忆与知识存储归 knowledge 类插件 `plugin_memory`（D-22）；hub 收敛为队列、Bot 注册与运行时、传输路由三类原语；Bot↔Agent 只传 TCP/UDP 帧，Bot↔Kernel 走 gRPC 控制面。
 2. **事件语义（D-02 / D-03）**：持久事件与尽力而为事件二分，Outbox + Consumer Group at-least-once；invalidation 只是提示，正确性由提交时版本检查唯一承担。
 3. **因果与追溯（D-05 / D-16）**：`correlation_id` / `causation_id` / `root_envelope_id` / `causal_path` / `traceparent` 全链路强制；所有入口统一 `IngressEnvelope` 校验，拒绝也记录完整上下文与加密快照。
-4. **存储模型（D-06 / D-07 / D-08 / D-13）**：图谱只存知识域；象限用显式 `visibility` + 双库 CHECK + 账号隔离；边集走 `edge_epoch` 同事务提交；金库独立分库统一经 Memory Gateway 六组 API 访问。
+4. **存储模型（D-06 / D-07 / D-08 / D-13 / D-21 / D-22）**：图谱只存知识域；象限用显式 `visibility` + 双 schema CHECK + 账号隔离；边集走 `edge_epoch` 同事务提交；金库与记忆 schema 统一由 `plugin_memory` 的工具面访问，内核只持 `kernel` schema 运行表账号。
 5. **同步策略（D-09）**：Obsidian 放弃双向同步，改为单向发布 + File Watcher 变更摄取，冲突走三方合并与人工审查。
 6. **Bot 运行（D-17 / D-18）**：Bot 是内核创建、监督、回收的独立二进制；分 lazy（按需、空闲回收、`agent_connection=per_task`）与 resident（常驻、持久长连接）两类，内核按 `activation_mode` reconcile。
 7. **角色体系（D-20）**：Bot 分内核侧四角色（user_bot 预置 / create_bot 工厂 / monitor_bot 监督 / security_bot 安全与热更新治理）与插件侧 xxx_bot / user_xxx_bot；命名即角色，保留名禁用；拉起决策在 create_bot、执行在内核 supervisor。
+8. **记忆插件化（D-22）**：记忆与知识能力完整归 knowledge 类插件 `plugin_memory`；内核与内核侧四角色不感知记忆；内核 schema 与插件 schema 分离；Health 聚合改由 monitor_bot；插件事件经 `memory_bot` 投递委托回投；图谱表更名 `memory_*`；M1 内核 MVP 变为纯内核。
 
 ## 3. 详细修正记录
 
@@ -175,3 +178,19 @@
 **影响**：插件侧 Bot 成为绕过内核的旁路；多插件环境的注册与热更新无统一治理。
 
 **修正（2026-11-10）**：新增架构总结 3.3.1——内核侧四角色（`user_bot` 用户席位预置常驻 / `create_bot` 读 Bot 与插件清单决定拉起 / `monitor_bot` 监督各 Bot 存续 / `security_bot` 负责插件注册与热更新治理）+ 插件侧业务 Bot（插件至少注册一个 `xxx_bot`，用户建设的命名 `user_xxx_bot`）；内核是唯一执行器（supervisor），`create_bot` 是决策者；保留名禁用；3.1 原语 3、Step 1、内核 MVP 详设 §3.10、开发规划 M2 同步。
+
+### D-21（P0）知识数据面未从内核拆出
+
+**问题**：架构虽声明 Memory Gateway 是独立数据面，但 3.1 仍把“知识访问与图谱存储”列为 hub 原语，8.4 又允许 MVP 先作为 hub 内模块，导致进程边界、DSN 边界与事务边界可能被开发便利击穿。
+
+**影响**：hub 继续持有图谱凭据并吸收知识业务；金库隔离退化为逻辑声明；图谱事务与内核 Outbox 强耦合，后续独立部署或换存储成本线性上升。
+
+**修正（2026-11-11）**：新增独立 Go 二进制 `memory-gateway`；hub 收敛为队列 / 事件、Bot 注册与运行时、传输路由三类原语。vault DSN 与 memory 图谱表账号只授予 gateway，hub 仅持有内核运行表账号；gateway 维护 `gateway_audit_log` 与双 schema `gateway_outbox`，图谱事务与本地 Outbox 同事务提交，再通过调用方 bot 的单次投递委托把事件回投 hub 统一入口。架构总结、内核 MVP 详设、开发规划、README 与 AGENTS 同步。
+
+### D-22（P0）记忆仍以内核数据面形态存在
+
+**问题**：D-21 虽把知识访问拆出 hub，但记忆仍以“内存数据面（memory-gateway）”的特殊形态存在：内核文档、内核 MVP 范围、双 schema 数据模型、Health Service、Bot 清单字段都围绕记忆组织，内核与内核侧四角色实际携带了记忆职责与凭据边界，微内核“记忆可替换 / 可停用”的性质没有成立。
+
+**影响**：任何记忆模型调整都会反向冲击内核文档与实现；内核侧与插件侧的边界模糊，删除记忆能力不再是纯粹卸载一个插件。
+
+**修正（2026-11-12）**：记忆即插件（用户决策）——所有记忆与知识能力（四象限记忆、个人金库、知识图谱、版本与晋升、Context Assembler、Memory Arbiter、用户级 Bot 个人记忆）完整归 knowledge 类插件 `plugin_memory`；内核与内核侧四角色不感知、不持有、不装配任何记忆；内核 schema（`kernel`）与插件 schema（`memory` / `vault`）分离，hub 只持 `kernel` 账号；Health 聚合改由 `monitor_bot`；插件事件经其 `memory_bot` 的单次投递委托回投；图谱表更名 `memory_*`；新增 `doc/MemoryPlugin/` 详设；M1 内核 MVP 收敛为纯内核（冒烟改用 `echo_bot` 夹具）。架构总结、内核 / Bot / Plugin 详设、开发规划、AGENTS、README 与代码骨架（`plugins/plugin_memory`、`migrations` 目录）同步。

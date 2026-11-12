@@ -1,12 +1,12 @@
 # NexusCore 架构设计总结
 
-> 整理时间：2026-11-05  
-> 来源：`doc/` 下三份架构讨论笔记，以及后续关于队列调度与多 Bot 记忆一致性的补充讨论  
+> 整理时间：2026-11-05（最近修订：2026-11-12，D-22 记忆插件化）
+> 来源：`doc/` 下三份架构讨论笔记，以及后续关于队列调度、多 Bot 记忆一致性与记忆插件化的补充讨论
 > 状态：设计文档，尚未对应到已实现代码
 
 ## 1. 一句话定位
 
-NexusCore 是一个以微内核为基础的个人智能工作台：内核只负责知识访问与图谱存储、持久化事件与任务队列、Bot 注册和跨设备路由；所有具体业务功能都以插件形式接入。系统同时遵守“脑手分离”原则，Bot 作为长期记忆与决策大脑运行在内核侧，Agent 作为无人格执行探针运行在本地或远程设备上。项目公共记忆是多个 Bot 的共享协作锚点，Bot 工作区只保存私有草稿，跨 Bot 可见的信息必须经过队列化晋升和一致性仲裁。认知处理（上下文装配、记忆仲裁）与深度审核策略运行在内核之外的 memory-worker 与安全插件中，内核不包含这些业务语义。个人笔记与全局公理存放在独立金库库，所有 Bot 只能经 Memory Gateway 只读访问；项目记忆与 Bot 记忆由记忆服务统一持有，业务插件只保存 `entity_id` 引用（见 8.4）。
+NexusCore 是一个以微内核为基础的个人智能工作台：内核只负责持久化事件与任务队列、Bot 注册与运行时、跨设备路由；所有具体业务功能（包括记忆与知识管理）都以插件形式接入。系统同时遵守“脑手分离”原则，Bot 作为长期决策体运行在内核侧或插件侧，Agent 作为无人格执行探针运行在本地或远程设备上。记忆与知识能力（四象限记忆、个人金库、知识图谱、晋升与上下文装配）完整归属于记忆插件 `plugin_memory`：内核与内核侧四角色（`user_bot / create_bot / monitor_bot / security_bot`）不感知、不持有、不装配任何记忆；删除记忆插件后，内核仍可作为队列与运行时底座独立运行。项目公共记忆是多个 Bot 的共享协作锚点，Bot 工作区只保存私有草稿，跨 Bot 可见的信息必须经过记忆插件内的队列化晋升和一致性仲裁。
 
 ## 2. 设计演进脉络
 
@@ -15,43 +15,43 @@ NexusCore 是一个以微内核为基础的个人智能工作台：内核只负�
 | 阶段 | 时间 | 核心命题 | 主要结论 |
 | --- | --- | --- | --- |
 | 初版全景方案 | 11.03 10:47 | 搭建跨设备记忆与工作台 | 确立 Go Hub、Python 记忆引擎、Tauri 工作台、VS Code 插件组合；提出 `ContextEnvelope` 与记忆图谱 |
-| 微内核插件化方案 | 11.03 10:52 | 防止功能膨胀成巨石单体 | 提出内核只保留四大原语；业务全部插件化；用 `kernel_entities/kernel_relations` 统一笔记、记忆和任务 |
+| 微内核插件化方案 | 11.03 10:52 | 防止功能膨胀成巨石单体 | 提出内核只保留底层原语；业务全部插件化 |
 | 脑手分离方案 | 11.03 11:27 | 划清 Bot 与 Agent、Bot 记忆与项目记忆边界 | 提出 Bot/Agent 双工任务流、输出蒸馏、正交记忆矩阵和记忆晋升机制 |
 
-最终采用第三阶段的边界规则，并保留前两阶段的模块划分与技术选型。
+最终采用第三阶段的边界规则，并保留前两阶段的模块划分与技术选型；2026-11-12 起记忆不再作为内核数据面存在，而是整体收敛为记忆插件（D-22）。
 
 ## 3. 核心架构原则
 
 ### 3.1 微内核
 
-内核不理解任何具体业务，不包含笔记渲染、看板拖拽、IM SDK、浏览器实现或具体工具执行逻辑。它只提供四类底层原语：
+内核不理解任何具体业务，不包含笔记渲染、看板拖拽、IM SDK、浏览器实现、工具执行逻辑，也不包含记忆存储、图谱、上下文装配与记忆仲裁。它只提供三类底层原语：
 
-1. **知识访问与图谱存储**：图谱只承载知识域；物理上分为金库库（个人笔记、全局公理）与记忆库（项目记忆、Bot 记忆、网页摘录），两库统一经 Memory Gateway 访问。PM 任务等强结构业务数据不入图谱，由插件自己的类型化表存储并通过 `entity_id` 引用图谱节点（见 8.1 / 8.4）。
-2. **事件、消息与持久化任务队列**：插件之间通过事件解耦。事件分为两类：正确性相关的持久事件（如 `project.memory.updated`、`task.state.changed`）必须与状态变更同事务写入 Transactional Outbox，再经持久化 Job Table 按 Consumer Group 投递，支持重投与显式 ack；UI 刷新类尽力而为事件可走内存通道，丢失可容忍（见 6.7）。入站消息、Bot 任务、审核任务和 Agent 任务进入持久化队列，支持重试、租约、死信和顺序分区。所有进入内核的消息必须携带完整因果链并通过统一入口校验（见 6.10）。
-3. **Bot 注册与运行时**：维护 Bot 身份、System Prompt、模型绑定、记忆空间和插件权限；内核是 Bot 独立二进制的唯一创建者与监督者，按 `activation_mode`（lazy / resident）激活、健康检查、崩溃重启与回收；Bot 分四角色——内核侧 `user_bot / create_bot / monitor_bot / security_bot`，插件侧 `xxx_bot / user_xxx_bot`（见 3.3.1）；lazy Bot 不持有 Bot-Agent 长连接，resident Bot 持有长连接；Bot 通过 gRPC 控制面注册、心跳、拉取任务与订阅事件（见 5.4 / 5.5）。
-4. **跨设备传输路由**：维护 Agent 节点连接池与原生 TCP/UDP 会话，把工具调用路由到对应设备；内核只负责传输、鉴权、多路复用与背压，应用层协议由插件定义（见 5.1）。
+1. **事件、消息与持久化任务队列**：插件之间通过事件解耦。事件分为两类：正确性相关的持久事件（如 `task.state.changed`、`plugin_memory.memory.updated`）必须与状态变更同事务写入 Transactional Outbox，再经持久化 Job Table 按 Consumer Group 投递，支持重投与显式 ack；UI 刷新类尽力而为事件可走内存通道，丢失可容忍（见 6.7）。入站消息、Bot 任务、审核任务和 Agent 任务进入持久化队列，支持重试、租约、死信和顺序分区。所有进入内核的消息必须携带完整因果链并通过统一入口校验（见 6.10）。
+2. **Bot 注册与运行时**：维护 Bot 身份、System Prompt、模型绑定、插件权限与激活方式；内核是 Bot 独立二进制的唯一创建者与监督者，按 `activation_mode`（lazy / resident）激活、健康检查、崩溃重启与回收；Bot 分两族——内核侧 `user_bot / create_bot / monitor_bot / security_bot`，插件侧 `xxx_bot / user_xxx_bot`（见 3.3.1）；lazy Bot 不持有 Bot-Agent 长连接，resident Bot 持有长连接；Bot 通过 gRPC 控制面注册、心跳、拉取任务与订阅事件（见 5.4 / 5.5）。
+3. **跨设备传输路由**：维护 Agent 节点连接池与原生 TCP/UDP 会话，把工具调用路由到对应设备；内核只负责传输、鉴权、多路复用与背压，应用层协议由插件定义（见 5.1）。
 
 以下强业务语义组件不属于内核，必须外置：
 
-- Context Assembler（上下文装配）与 Memory Arbiter（记忆仲裁）：归入 memory-worker 认知服务。
+- **记忆插件 `plugin_memory`（knowledge 类插件）**：知识访问、图谱存储、个人金库、版本化写入、晋升队列、Context Assembler、Memory Arbiter、用户级 Bot 个人记忆（`personal_stack_v1`）全部属于该插件的内部设计与实现；内核不持有其存储凭据、不解释其数据结构、不参与上下文装配（见 7 / 8.4 与 `doc/MemoryPlugin/`）。
+- Context Assembler（上下文装配）与 Memory Arbiter（记忆仲裁）：归入 `plugin_memory` 内的 memory-worker 认知服务。
 - 深度审核与执行前审核策略：归入安全审核插件。
-- Memory Gateway 与金库库：Memory Gateway 是独立数据面，金库凭据只存在于网关；内核其余部分不直连金库。
-- Gateway Health Service：负责 Agent/Bot 健康报告的聚合、去重与评分；内核只做注册、策略校验与事件广播。
-- 内核对它们只提供经 Memory Gateway 的图谱读写、版本化写入、晋升队列入队和审计事件投递等原语。
+- Health Service：原独立聚合服务取消；健康报告仍走统一入口（`channel=health`），聚合与去重由内核侧监督角色 `monitor_bot` 承担，评分与策略属于其插件 / Bot 逻辑，内核只持久化与投递事件（见 6.9）。
+- 笔记渲染、PM 看板、IM 连接器、浏览器与编辑器集成等外围业务：全部插件化。
 
-判断一个功能是否属于内核的标准：如果把 Obsidian、PM、IM、浏览器、VS Code 全部删除，再把 Context Assembler、Memory Arbiter 和审核策略也删除，剩下的部分是否仍能作为存储与调度底座独立运行并保持核心价值。
+判断一个功能是否属于内核的标准：如果把 Obsidian、PM、IM、浏览器、VS Code 全部删除，再把记忆插件与安全审核插件也删除，剩下的部分是否仍能作为队列与运行时底座独立运行并保持核心价值。
 
 ### 3.2 万物皆插件
 
-插件分为三类：
+插件分为四类：
 
 | 插件类型 | 代表模块 | 职责 |
 | --- | --- | --- |
 | 入站通道插件 | QQ、Telegram、Discord、飞书、VS Code 插件、批注浏览器 | 作为所服务 bot（含 user_bot）的投递代理：外部交互转成业务载荷（`ContextEnvelope`），以该 bot 的 `IngressEnvelope` 投递进内核；系统响应渲染回原渠道 |
-| 工作台视图插件 | Obsidian 双链笔记、PM 看板、记忆图谱、Bot 管理后台 | 知识视图经 Memory Gateway 读写图谱；PM 等强结构插件读写自己的类型化表，通过 `entity_id` 引用图谱节点 |
+| 工作台视图插件 | Obsidian 双链笔记、PM 看板、记忆图谱视图、Bot 管理后台 | UI 视图；知识视图通过记忆插件工具读写图谱；PM 等强结构插件读写自己的类型化表，通过 `entity_id` 引用图谱节点 |
 | 执行器插件 | 远程 Agent、本地沙盒、数据库查询工具 | 按插件协议监听工具调用，在具体环境中执行并返回结果 |
+| 知识 / 记忆插件 | `plugin_memory`（首发） | 持有知识图谱、个人金库与记忆生命周期（晋升、版本、装配）；向其他插件与 Bot 提供知识读写与上下文装配工具；不含 UI |
 
-插件通过 Manifest 声明插件 ID、类型、期望订阅的事件、提供工具、UI 挂载点与传输/协议能力；注册需要身份凭证，订阅与工具权限由用户逐项批准后生效（见 3.4）。
+插件通过 Manifest 声明插件 ID、类型、期望订阅的事件、提供工具、UI 挂载点与传输/协议能力；注册需要身份凭证，订阅与工具权限由用户逐项批准后生效（见 3.4）。每个插件至少注册一个插件侧 Bot；`plugin_memory` 注册 `memory_bot` 作为其总线身份（见 3.3.1）。
 
 ### 3.3 脑手分离
 
@@ -59,8 +59,10 @@ NexusCore 是一个以微内核为基础的个人智能工作台：内核只负�
 
 | 对象 | 位置 | 是否有长期人格 | 是否有记忆 | 是否执行物理操作 |
 | --- | --- | --- | --- | --- |
-| Bot 总类 | 内核侧 + 插件侧 | 按角色 | 按角色 | 不直接 Shell 操作 |
+| Bot 总类 | 内核侧 + 插件侧 | 按角色 | 由记忆插件提供，Bot 自身不持久化记忆 | 不直接 Shell 操作 |
 | Agent Tool | 本地电脑、服务器、Docker、浏览器执行环境 | 无 | 只有任务工作现场 | 提供算力和工具，执行 `bash_exec`、`git_diff` 等 |
+
+“记忆由记忆插件提供”的含义：Bot 进程内不持有长期记忆存储，内核也不为 Bot 注入上下文；Bot 需要记忆时，通过记忆插件工具按 `bot_id / project_id / namespace` 授权读取，任务产物也通过插件工具提交晋升。内核侧四角色不读取、不写入任何记忆。
 
 ### 3.3.1 Bot 角色体系：内核侧与插件侧
 
@@ -68,12 +70,12 @@ Bot 分两类托管：**内核侧**（hub 进程直接持有角色注册表与�
 
 | 角色 | 托管侧 | 职责 | 拉起关系 |
 | --- | --- | --- | --- |
-| `user_bot` | 内核侧 | 用户席位：常驻投递 / 消息代理的挂点、输入裁决和工作台入口 | 内核启动时创建（resident） |
-| `create_bot` | 内核侧 | Bot 工厂：阅读内核的 bot 清单与插件清单，按需**拉起相关 Bot 进程**；负责 lazy/resident 状态机与 drain | 由 `user_bot` 指令拉起（worker 模式） |
-| `monitor_bot` | 内核侧 | 监督者：滚动检查各 Bot 的存续（进程、心跳、租约、Consumer Group 消费位点），超阈走 Health 链路（6.9） | 由 `user_bot` 指令拉起（常驻优先） |
+| `user_bot` | 内核侧 | 用户席位：常驻投递 / 消息代理的挂点、输入裁决和工作台入口；不持有记忆 | 内核启动时创建（resident） |
+| `create_bot` | 内核侧 | Bot 工厂：阅读内核的 bot 清单与插件清单，按需**拉起相关 Bot 进程**；负责 lazy/resident 状态机与 drain；不持有记忆 | 由 `user_bot` 指令拉起（worker 模式） |
+| `monitor_bot` | 内核侧 | 监督者：滚动检查各 Bot 的存续（进程、心跳、租约、Consumer Group 消费位点），超阈走 Health 链路（6.9）；承担健康报告聚合 | 由 `user_bot` 指令拉起（常驻优先） |
 | `security_bot` | 内核侧 | 插件与 Bot 的安全审查员：**插件注册校验**、插件侧 Bot 注册审查、高危审核（配 3.4）、插件安装后的**热更新安全策略**（隔离运行 + 灰度观察窗） | 常驻；策略只读 + 审计写入 |
-| `xxx_bot`（业务 Bot） | 插件侧 | 业务 bot：命名 `xxx_bot`（如 `architect_bot / pm_bot`）；由承载它的**插件**在安装后向内核注册 bot | 由 `create_bot` 按插件清单拉起 |
-| `user_xxx_bot`（用户自定义 Bot） | 插件侧 | 用户通过该插件的界面 / 配置自建的 bot，命名加 `user_` 前缀（如 `user_writer_bot`）；与 `xxx_bot` 共用插件提供的工具与权限 | 由 `create_bot` 按用户清单拉起，安全审查进 `security_bot` |
+| `xxx_bot`（业务 Bot） | 插件侧 | 业务 bot：命名 `xxx_bot`（如 `architect_bot / pm_bot`）；由承载它的**插件**在安装后向内核注册 bot；记忆需求经 `plugin_memory` 工具申请 | 由 `create_bot` 按插件清单拉起 |
+| `user_xxx_bot`（用户自定义 Bot） | 插件侧 | 用户通过该插件的界面 / 配置自建的 bot，命名加 `user_` 前缀（如 `user_writer_bot`）；默认 `memory_profile=personal_stack_v1`（由 `plugin_memory` 实现） | 由 `create_bot` 按用户清单拉起，安全审查进 `security_bot` |
 
 规则：
 
@@ -82,14 +84,16 @@ Bot 分两类托管：**内核侧**（hub 进程直接持有角色注册表与�
 3. `security_bot` 与 3.4 的凭证 / ACL 体系配合：插件被批准后先注册 `xxx_bot`（与 3.4 的授权记录互查），用户自建 `user_xxx_bot` 时默认走同一套审查；热更新采用"新进程 drain 旧进程"（同 5.5 升级规则），观察期异常即回滚。
 4. **拉起链路：`user_bot → 内核控制面 → create_bot → 各 Bot`**；`create_bot / monitor_bot` 不接受业务消息，仅响应 `user_bot` 与 Health 链路事件。
 5. 插件侧 Bot 同样只有 gRPC 控制面（5.4）一条接入路径；插件本身不持有 Bot 进程，只登记（插件清单 → bot 清单 → create_bot 拉起）。
+6. **记忆不是 Bot 的固有属性**：`memory_profile` 只是插件清单写给内核的声明字段，内核原样存储、不解释；其读取与写入全部由 `plugin_memory` 按其自身 ACL 执行。内核侧四角色不声明、不使用任何记忆 profile。
 
-统一总线规则：用户以 `user_bot` 身份在总线上（客户端插件只是 user_bot 的投递 / 展示代理）；**只有 bot 能投递与消费消息**，内核是各个 bot 之间的消息通道（每 bot 一个 Consumer Group 即其邮箱）。入口适配器（IM / VS Code / 浏览器 / CLI）代 bot 发信，不允许非 bot 主体直入内核。
+统一总线规则：用户以 `user_bot` 身份在总线上（客户端插件只是 user_bot 的投递 / 展示代理）；**只有 bot 能投递与消费消息**，内核是各个 bot 之间的消息通道（每 bot 一个 Consumer Group 即其邮箱）。入口适配器（IM / VS Code / 浏览器 / CLI）代 bot 发信，不允许非 bot 主体直入内核。插件（含 `plugin_memory`）不是总线主体，事件必须经其注册的 bot 以单次投递委托投递（见 8.4）。
 
 该边界的价值：
 
 1. 防止 Agent 的大体积输出直接污染 Bot 上下文和记忆库。
 2. 防止 Bot 携带项目私有知识跨项目迁移造成记忆串台。
 3. 允许更换 Bot 时继承项目资产，也允许同一 Bot 服务多个项目。
+4. 记忆能力可以独立替换 / 停用，内核不受影响。
 
 ### 3.4 插件与 Agent 信任边界
 
@@ -99,13 +103,18 @@ Manifest 只是声明，不构成授权；授权由用户在工作台逐项完�
 
 1. 插件安装时由用户签发身份凭证（短期 token，可轮换、可吊销），凭证绑定 `plugin_id`；进程接入内核必须携带凭证，未认证进程无法以插件身份注册或订阅事件。
 2. Manifest 声明的是“期望权限”（订阅事件、提供工具、UI 挂载点、namespace 访问、传输与协议声明）；用户批准后写入注册表，未批准的声明一律不生效。
-3. 事件订阅授权按 `namespace / project / bot` 三个维度过滤，例如“订阅 `note.updated`，仅限 `proj_nexus` 的 `obsidian_note`”。
+3. 事件订阅授权按 `namespace / project / bot` 三个维度过滤，例如“订阅 `plugin_obsidian.note.updated`，仅限 `proj_nexus` 的 `obsidian` 命名空间”。
 
 事件载荷 ACL：
 
 - Dispatcher 在投递前按订阅方权限过滤载荷：无权字段剔除或脱敏，禁止先广播全量再靠接收方自觉。
 - 载荷过滤失败按投递失败处理并重试，绝不降级为全量投递。
 - 用户可随时吊销订阅，吊销后该 Consumer Group 不再收到新事件。
+
+插件内部 ACL：
+
+- `plugin_memory` 对自己的图谱与金库执行第二层 ACL：调用方必须携带已认证的 `from_bot_id` 及其 `plugin_id` 归属，按 `namespace / project / bot` 与 `visibility` 判定可读可写范围；内核不代替插件做知识授权。
+- 插件工具的调用同样受 3.4 工具授权约束：Bot 必须在其 `requiring_tools[]` 声明并被用户批准后才能调用 `plugin_memory.*`。
 
 Agent 凭证与高危权威：
 
@@ -123,18 +132,27 @@ flowchart LR
         W["Tauri 工作台"]
     end
 
-    subgraph Kernel["NexusCore Kernel / Hub（仅四类原语）"]
+    subgraph Kernel["NexusCore Kernel / Hub（仅三类原语）"]
         R["插件注册与权限"]
         BR["Bot 注册与运行时（gRPC）"]
         Q["持久化队列 / 死信队列 / 入口快速校验"]
-        OB["Transactional Outbox（各库本地一份）"]
+        OB["Kernel Transactional Outbox（运行表事务）"]
         E["事件总线"]
         A["Agent Mesh 传输路由"]
+    end
+
+    subgraph Plugins["插件生态"]
+        PM["plugin_memory（knowledge）：图谱 / 金库 / 晋升 / 上下文装配"]
+        PO["plugin_obsidian（workspace）"]
+        PP["plugin_pm（workspace）"]
+        PI["入站通道插件（IM / 浏览器 / VS Code）"]
+        PE["执行器插件"]
     end
 
     subgraph Bots["Bot Runtime（按类型创建）"]
         BL["Lazy Bot（按需，无长连接）"]
         BR2["Resident Bot（常驻，持长连接）"]
+        MB["memory_bot（plugin_memory 的总线身份）"]
     end
 
     subgraph Audit["安全审核插件（策略外置）"]
@@ -142,17 +160,9 @@ flowchart LR
         HITL["人工确认 HITL"]
     end
 
-    subgraph Cognition["记忆认知服务（memory-worker）"]
-        CA["Context Assembler"]
-        MA["Memory Arbiter"]
-        P["LLM 实体抽取 / Embedding"]
-    end
-
-    subgraph Stores["Gateway 数据面与存储层（凭据隔离）"]
-        MG["Memory Gateway"]
-        HS["Health Service"]
-        MS["记忆库（项目 / Bot 记忆 + 内核运行表）"]
-        VS["金库库（个人笔记 / 全局公理）"]
+    subgraph Stores["存储层（凭据隔离）"]
+        KS["kernel schema（hub 运行表）"]
+        MS["memory / vault schema（plugin_memory）"]
     end
 
     subgraph Agents["执行节点"]
@@ -176,39 +186,47 @@ flowchart LR
     Q -->|任务流| BR
     BR -->|响应 / 事件| E
     E -->|事件订阅| BR
-    E -->|装配请求| CA
-    CA -->|读请求| MG
-    CA -->|Agent 任务| A
-    E --> P
-    P --> MG
-    MG --> MS
-    MG --> VS
-    A --> A1
-    A --> A2
-    A --> A3
-    A1 & A2 & A3 -->|流式日志 / 蒸馏摘要| A
-    A1 & A2 & A3 -->|健康报告| HS
-    HS -->|聚合报告| Q
-    A -->|任务结果| Q
-    Q -->|晋升任务| MA
-    MA -->|版本化写入| MG
-    MS -.->|同事务落 Outbox| OB
-    VS -.->|同事务落 Outbox| OB
+    E -->|工具调用 / 事件| PM
+    PI -->|载荷写入出口| Q
+    PM -->|事件回投（memory_bot 委托）| Q
+    PM --> MS
+    KS -.->|运行表事务内落 Outbox| OB
     OB -->|持久事件投递| E
+    A1 & A2 & A3 -->|流式日志 / 蒸馏摘要| A
+    A1 & A2 & A3 -->|健康报告| E
+    A -->|任务结果| Q
     E -->|响应 / 健康事件| Client
 ```
 
-建议的 monorepo 结构：
+建议的 monorepo 结构（当前骨架）：
 
 ```text
 nexus-core/
-├── hub/                 # Go 微内核网关：连接、鉴权、路由、事件总线、队列、事务；MVP 内含 Gateway 模块（Memory Gateway + Health Service，不含认知与审核策略）
+├── hub/                 # Go 微内核网关：连接、鉴权、路由、事件总线、队列、事务；不含记忆与知识访问
 ├── bot-runtime/         # Bot 独立二进制运行时：由内核按需创建与回收，通过 gRPC 接入
-├── memory-worker/       # Python 记忆认知引擎：上下文装配、记忆仲裁、抽取、嵌入、蒸馏、晋升；持有记忆库
 ├── agent-daemon/        # 跨设备探针：原生 TCP/UDP 会话、本地工具执行；应用层协议由插件定义
-├── workbench-app/       # Tauri + React 工作台
-└── vscode-ext/          # VS Code 原生插件
+├── cli/                 # 用户(user_bot)的投递与管理代理
+├── cmd/migrate/         # 内核库迁移 CLI
+├── internal/            # 跨二进制共享内部包（version / migrate）
+├── plugins/
+│   └── plugin_memory/   # 记忆插件：Go 知识服务 + Python memory-worker（M4）+ manifest（M3 起落地）
+├── migrations/
+│   ├── kernel/          # 内核运行表 DDL（M1 填充）
+│   └── plugins/
+│       └── plugin_memory/{memory,vault}/   # 插件自有 DDL（M2 审查流程 / M3 填充）
+├── workbench-app/       # Tauri + React 工作台（M7）
+└── vscode-ext/          # VS Code 原生插件（M6 起）
 ```
+
+### 4.1 记忆插件形态
+
+`plugin_memory` 是 knowledge 类插件，包含三部分：
+
+1. **知识服务（Go 二进制）**：图谱事务、金库访问、版本与晋升、审计与本地 Outbox，对外暴露插件工具（5.0）。
+2. **memory-worker（Python，M4）**：Context Assembler、Memory Arbiter、实体抽取 / 蒸馏 / 整合（Auto Dream）。
+3. **`memory_bot`（插件侧 Bot）**：插件在总线上的身份；plugin_memory 的事件经单次投递委托以该 bot 名义回投内核入口。
+
+`plugin_memory` 不是内核数据面：内核不持其 DSN、不建其表、不读其数据、不为其保留任何特殊通道；它与 PM、Obsidian 等插件在接入方式上完全同级，区别只是它更早落地、更复杂。
 
 ## 5. Bot 与 Agent 通信协议
 
@@ -250,18 +268,18 @@ transport_frame
 1. **意图调用**
    Bot 只发出轻量指令，例如调用 `sandbox_bash` 执行测试。
 2. **上下文水合**
-   memory-worker 的 Context Assembler 在转发前装配项目规则、历史踩坑、环境变量等 `TaskContext`；内核只负责投递。
+   记忆插件 `plugin_memory` 的 Context Assembler 在转发前装配项目规则、历史踩坑、环境变量等 `TaskContext`；内核只负责投递，不参与装配。
 3. **双向交互**
    Agent 遇到高危操作、缺少参数或需要授权时，可按插件协议发起挂起请求（例如 `agent.yield_confirm`），等待 Bot 或人类确认；内核只转发 stream，不解释请求语义。
 4. **结果蒸馏**
-   原始输出与结构化摘要分离，只有摘要进入 Bot 上下文。
+   原始输出与结构化摘要分离，只有摘要进入 Bot 上下文与（经插件提交的）记忆候选。
 
 ### 5.3 输出双层结构
 
 | 输出层 | 内容 | 去向 |
 | --- | --- | --- |
 | `raw_stream_uri` | 完整日志、堆栈、终端输出 | 冷存储或前端终端窗口，供人工查看 |
-| `distilled_artifact` | 退出码、错误文件、关键行号、核心结论、测试结果摘要 | 进入 Bot 上下文和记忆系统 |
+| `distilled_artifact` | 退出码、错误文件、关键行号、核心结论、测试结果摘要 | 进入 Bot 上下文和记忆候选 |
 
 这一步是防止上下文爆炸和记忆污染的关键，不应后置到 MVP 之后。
 
@@ -295,7 +313,7 @@ service BotRuntime {
 3. 所有请求携带 `request_id`；任务携带 `correlation_id` / `causation_id`，断线重连后按 job 状态续传。
 4. gRPC 只承载控制面；Agent 执行流仍走 5.1 的 TCP/UDP 插件协议，不把执行数据塞进控制面。
 5. Bot 的业务输出仍以 `ContextEnvelope` 载荷（经 `payload_ref` 引用）或事件形式进队列，内核不解析业务载荷。
-6. 健康报告不直接调用 `BotRuntime`，而是调用 Gateway 的 `HealthService`（见 6.9）；内核只接收聚合后的报告。
+6. 健康报告不直接调用 `BotRuntime`，而是以 `channel=health` 的信封进入统一入口；聚合由 `monitor_bot` 承担（见 6.9）。
 7. 所有 gRPC 请求必须携带 `causal_context`（见 6.8 / 6.10）；缺失或不合法的请求在入口直接拒绝并记录。
 8. Lazy Bot 的 gRPC 会话随进程生命周期，不持有常驻 `StreamTasks` / `SubscribeEvents`；Resident Bot 持有长期流，断线后由内核按 `desired_state` 续订。
 
@@ -329,6 +347,7 @@ bot_manifest
 ├── min_instances
 ├── max_instances
 ├── idle_ttl             # lazy only
+├── memory_profile       # 插件声明字段，内核只存储不解释（见 3.3.1 规则 6）
 └── warm_pool            # resident only，默认 0
 ```
 
@@ -346,7 +365,7 @@ resident: registered -> starting -> ready -> busy -> draining -> stopped
 2. Lazy Bot 不持有 Bot-Agent 长连接；任务开始时建立短连接，任务结束或失败即关闭。dormant 时没有进程、没有常驻订阅，事件由内核持久化，激活后按 Consumer Group 消费。
 3. Resident Bot 在 kernel 启动、项目激活或用户启用时创建，持有到其绑定 Agent 节点的长连接；长期 `StreamTasks` / `SubscribeEvents` 不因空闲断开，崩溃后由 supervisor 重启并重建连接。
 4. 任务先入队再触发 lazy 激活；启动期间任务保持 queued，不提前 lease。resident 仅在未 ready 或 draining 时暂停 lease。
-5. `starting` 超过 `start_timeout` 后任务回队列或进入 suspended；连续崩溃按指数退避，超过阈值熔断并上报 Health Service。
+5. `starting` 超过 `start_timeout` 后任务回队列或进入 suspended；连续崩溃按指数退避，超过阈值熔断并上报 Health 链路。
 6. 长连接不绕过内核：resident 的 Bot-Agent 会话仍经 Agent Mesh 路由，受 3.4 ACL、6.8 因果链与 6.10 入口校验约束。
 7. Agent 故障时，resident 的长连接会断开并重连，在途任务进入 suspended / retry；lazy 没有空闲长连接，Agent 故障由内核心跳与任务租约检测。
 8. 升级采用版本固定 + drain + 切换；resident 在切换后重建长连接，lazy 无长期状态可恢复。
@@ -365,7 +384,7 @@ resident: registered -> starting -> ready -> busy -> draining -> stopped
   -> 入口快速校验（内核）与异步深度审核（安全插件）
   -> Bot 路由 / Bot Runtime Queue
   -> Agent 任务队列
-  -> 响应 / 记忆晋升 / Outbox
+  -> 响应 / 记忆候选（经 plugin_memory 工具）/ Outbox
 ```
 
 所有入口先经 6.10 的 `IngressEnvelope` 校验（因果链、凭证、幂等键），再进入 Ingress Queue；校验失败的消息记录后拒绝。
@@ -489,13 +508,15 @@ kernel_jobs
 2. 同一 `project_id` 的强相关任务可在同组内串行。
 3. 不同 partition_key、不同 Consumer Group、不同队列之间并行，无顺序承诺。
 4. Agent 长任务独立异步，不阻塞普通聊天。
-5. 跨队列接力（Ingress → Bot Runtime → Agent → 晋升）不承诺顺序，只承诺因果可追溯（见 6.8）。
+5. 跨队列接力（Ingress → Bot Runtime → Agent → 记忆候选）不承诺顺序，只承诺因果可追溯（见 6.8）。
 
 分区键：
 
 ```text
 partition_key = conversation_id 或 project_id
 ```
+
+取值来源属于业务信封 schema（D-12 未定稿）：目标是由入口适配器在创建 job 时随适配器侧通讯元数据提供，内核不解析业务载荷；该字段未定稿前，M1 实现先退化为 `queue_name` 级并行，并用测试桩固化"同分区不越位"语义。
 
 实现与边界：
 
@@ -510,7 +531,7 @@ partition_key = conversation_id 或 project_id
 
 | 事件类别 | 代表事件 | 投递通道 | 投递保证 |
 | --- | --- | --- | --- |
-| 持久事件 | `project.memory.updated`、`project.memory.invalidated`、`task.state.changed`、审核事件、`note.updated` | Transactional Outbox + 持久化 Job Table | at-least-once，显式 ack，可重投 |
+| 持久事件 | `plugin_memory.memory.updated`、`plugin_memory.memory.invalidated`、`task.state.changed`、审核事件、`plugin_obsidian.note.updated` | Transactional Outbox + 持久化 Job Table | at-least-once，显式 ack，可重投 |
 | 尽力而为事件 | `graph.node.highlight`、UI 刷新、动画信号 | 内存 WebSocket Pub/Sub | at-most-once，丢失可容忍 |
 
 正确性相关事件一律使用持久事件；通过尽力而为通道投递正确性事件属于实现错误。
@@ -519,9 +540,10 @@ partition_key = conversation_id 或 project_id
 
 1. 状态变更与 Outbox 记录在同一个数据库事务内提交，禁止“先改状态后补事件”。
 2. Outbox Dispatcher 独立扫描 `pending` 记录，按事件类型匹配已订阅且经用户授权的 Consumer Group，并按订阅授权过滤载荷（见 3.4），为每个组生成一条 `event.deliver` job（复用 `kernel_jobs`，`queue_name = consumer_group_id`）。
-3. 消费者按本组队列消费，处理成功后显式 ack；未 ack 的事件在租约过期后重投，重试与死信语义复用 `kernel_jobs`。
-4. at-least-once 意味着消费者必须幂等：以 `event_id` 为幂等键，处理前查本组去重表；重复事件只记录状态，不重复执行副作用。
-5. Outbox 记录全部分发完成后标记 `dispatched` 并定期归档，不物理删除，保留审计链路。
+3. 消费者的业务输出（含插件事件）必须由 bot 身份投递：插件在本插件库内与业务事务同事务写本地 Outbox，再由其注册 bot 以单次投递委托回投内核统一入口（`plugin_memory` 即 `memory_bot`，见 8.4）。
+4. 消费者按本组队列消费，处理成功后显式 ack；未 ack 的事件在租约过期后重投，重试与死信语义复用 `kernel_jobs`。
+5. at-least-once 意味着消费者必须幂等：以 `event_id` 为幂等键，处理前查本组去重表；重复事件只记录状态，不重复执行副作用。
+6. Outbox 记录全部分发完成后标记 `dispatched` 并定期归档，不物理删除，保留审计链路。
 
 出箱与订阅表建议：
 
@@ -532,7 +554,7 @@ kernel_event_outbox
 ├── event_type
 ├── correlation_id  # 业务根因，继承自触发本事件的 job
 ├── causation_id    # 直接原因，指向触发本事件的 job / 事件
-├── aggregate_type  # memory_entity / job / project / audit
+├── aggregate_type  # job / project / audit / plugin
 ├── aggregate_id
 ├── payload_json    # 只放 ID 与摘要，大对象走引用
 ├── status          # pending / dispatched / archived
@@ -557,11 +579,11 @@ kernel_event_dedup
 
 消费位点由各 Consumer Group 的 `event.deliver` job 状态隐式构成：acked 即已消费，leased / queued 即待消费或待重投。
 
-边界说明：持久化解决“事件不丢、可重投、可审计”；它不承诺跨 Consumer Group 的全局消费顺序，也不改变进行中任务的决策正确性，后者仍由 7.4 的提交时版本检查兜底。正确性分工见 7.5。
+边界说明：持久化解决“事件不丢、可重投、可审计”；它不承诺跨 Consumer Group 的全局消费顺序，也不改变进行中任务的决策正确性，后者由记忆插件内部的提交时版本检查兜底（见 7.4 / 7.5）。记忆插件的事件同样只是提示，其内部一致性由插件自己的版本检查承担。
 
 ### 6.8 因果链与跨队列追溯
 
-跨队列不承诺顺序，但必须可追溯。信封、job 与持久事件统一携带三个追踪字段；完整信封 schema 仍待定稿，但追踪头属于强制字段，先行冻结：
+跨队列不承诺顺序，但必须可追溯。信封、job 与持久事件统一携带三个追踪字段：
 
 | 字段 | 语义 | 传播规则 |
 | --- | --- | --- |
@@ -571,13 +593,13 @@ kernel_event_dedup
 | `causal_path` | 有序祖先节点列表（节点 ID / 类型 / actor / 时间） | 每跳追加；深度上限 32，最后一项必须等于 `causation_id` |
 | `traceparent` | W3C Trace Context 调用链 | 入口开启新 trace，每一跳生成子 span |
 
-传播示例（IM 消息 → Bot → Agent → 记忆晋升）：
+传播示例（IM 消息 → Bot → Agent → 记忆插件晋升）：
 
 ```text
 Ingress job    correlation_id = env_001   causation_id = NULL
 Bot job        correlation_id = env_001   causation_id = <ingress_job_id>
 Agent job      correlation_id = env_001   causation_id = <bot_job_id>
-Promotion job  correlation_id = env_001   causation_id = <agent_job_id>
+Promotion job  correlation_id = env_001   causation_id = <agent_job_id>   # plugin_memory 内部，经因果头衔接
 持久事件        correlation_id = env_001   causation_id = <promotion_job_id>
 ```
 
@@ -585,7 +607,7 @@ Promotion job  correlation_id = env_001   causation_id = <agent_job_id>
 
 1. fan-out 复制任务时，所有副本共享同一个 `correlation_id` 与同一个 `causation_id`（指向共同父节点）；副本互为兄弟，互不有序。
 2. `causation_id` 只表达“谁触发了我”，不表达“必须等谁完成”；需要等待语义时使用任务编排器（6.2），不得用因果链冒充执行依赖。
-3. DLQ、审核记录、Agent 原始日志与记忆晋升记录均按 `correlation_id` 建索引，一条入站消息的全链路由此串联。
+3. DLQ、审核记录、Agent 原始日志与记忆晋升记录均按 `correlation_id` 建索引，一条入站消息的全链路由此串联。记忆插件的本地审计同样记录 `correlation_id`，内核无需读取其表即可与总线日志对账。
 4. `traceparent` 用于指标与调用链渲染，`correlation_id` 用于业务审计，职责不混用。
 5. 所有入口——用户 `@bot`、IM、VS Code、浏览器、Bot gRPC、Agent 健康报告——必须携带完整因果头；缺失或不合法一律拒绝并记录，不允许内核补造。
 6. `causal_path` 只存节点 ID、节点类型、`from_bot_id` 与时间，不存正文；正文由 6.10 的加密上下文快照承载。
@@ -596,10 +618,11 @@ Promotion job  correlation_id = env_001   causation_id = <agent_job_id>
 
 ```text
 Bot / Agent / Supervisor
-  -> Gateway Health Service     # 认证、去重、聚合、评分
-  -> 内核                       # 策略校验、状态迁移、Outbox
-  -> 事件总线
-  -> 专门 Bot / 用户            # 按订阅授权广播
+  -> 统一入口（channel=health，完整因果头）
+  -> monitor_bot（去重 / 聚合 / 评分，内核侧监督角色）
+  -> 内核策略校验与状态迁移（supervisor 执行）
+  -> Outbox → 事件总线
+  -> 专门 Bot / 用户（按订阅授权广播）
 ```
 
 报告字段：
@@ -622,21 +645,19 @@ health_report
 
 规则：
 
-1. Health Service 按 `target_id + failure_class + 时间窗` 去重聚合，维护健康分数；单条报告只是证据，不直接改状态。
-2. 聚合报告通过内核内部 gRPC 进入 Ingress Queue；内核负责策略校验、Bot/Agent 状态迁移与 Outbox 写入。
-3. 内核发布 `agent.health.changed` / `bot.health.changed` 持久事件（6.7），按 3.4 的订阅授权广播给专门 Bot 或用户。
-4. 一个 Bot 不能直接驱逐 Agent；需要阈值、多源佐证或人工确认。异常上报按速率限制处理并进入审计。
-5. Bot 自身停摆不能依赖自报：内核的进程 supervisor 检测进程退出，心跳超时与 job 租约检测 `bot_stalled` / `bot_crash`，由 supervisor 或内核补发报告。
-6. 健康事件只提示，不替代 7.4 的版本检查与 job 状态机；任务是否重试、挂起或进入 DLQ 仍由内核 job 状态机决定（D-04 的幂等与租约语义仍是前置条件）。
-7. 健康报告投递必须走 6.10 信封（`channel=health`，因果头齐全）；载荷字段定义见下。Health Service 与内核入口共用同一套校验，缺失即拒绝并记录。
-8. 聚合报告以 `incident_id` 为新根（`root_envelope_id`），并在 `evidence_refs[]` 中保留所有源报告的 `report_id` + `correlation_id`；聚合不得丢失单条报告的溯源。
-9. Resident Bot 的 Bot-Agent 长连接断开可作为 Agent 故障的辅助信号；Lazy Bot 没有空闲长连接，Agent 故障只能由 Agent 心跳、任务租约与执行超时判定。
+1. `monitor_bot` 按 `target_id + failure_class + 时间窗` 去重聚合，维护健康分数；单条报告只是证据，不直接改状态。聚合逻辑属于该 Bot 的实现，内核不实现评分策略。
+2. 聚合结果以 `bot.health.changed` / `agent.health.changed` 持久事件广播，按 3.4 的订阅授权送达专门 Bot 或用户；内核只持久化报告、执行状态迁移与投递事件。
+3. 一个 Bot 不能直接驱逐 Agent；需要阈值、多源佐证或人工确认。异常上报按速率限制处理并进入审计。
+4. Bot 自身停摆不能依赖自报：内核的进程 supervisor 检测进程退出，心跳超时与 job 租约检测 `bot_stalled` / `bot_crash`，由 supervisor 或 monitor_bot 补发报告。
+5. 健康事件只提示，不替代 7.4 的版本检查与 job 状态机；任务是否重试、挂起或进入 DLQ 仍由内核 job 状态机决定。
+6. 健康报告投递必须走 6.10 信封（`channel=health`，因果头齐全）；聚合报告以 `incident_id` 为新根（`root_envelope_id`），并在 `evidence_refs[]` 中保留所有源报告的 `report_id` + `correlation_id`；聚合不得丢失单条报告的溯源。
+7. Resident Bot 的 Bot-Agent 长连接断开可作为 Agent 故障的辅助信号；Lazy Bot 没有空闲长连接，Agent 故障只能由 Agent 心跳、任务租约与执行超时判定。
 
 ### 6.10 全局可追溯与上下文日志
 
-所有进入内核的消息，不论来自用户、IM、VS Code、浏览器、Bot、Agent 还是 Health Service，统一使用 `IngressEnvelope`。Health Service 在网关侧先做一次 schema 与凭证校验，内核入口做最终校验；两侧共用同一份 schema 与错误码。
+所有进入内核的消息，不论来自用户、IM、VS Code、浏览器、Bot、Agent 还是健康报告，统一使用 `IngressEnvelope`。入口适配器与入口插件在网关侧先做一次 schema 与凭证校验，内核入口做最终校验；两侧共用同一份 schema 与错误码。
 
-信封职责收敛（D-19）：**信封只负责通讯**——身份、寻址、因果、幂等与审计挂点；不携带业务语义。`project_id / conversation_id` 等业务维度随载荷走（业务信封由来源插件 / bot 协议定义）。接收 bot 拆信封后，按 `payload_ref` 经 Memory Gateway / 快照存储**自行拉取**业务内容，内核不做上下文水合推送。审计的项目 / Bot 维度由接收 bot 解析载荷后写业务记录（检查点、晋升审计等）。
+信封职责收敛（D-19）：**信封只负责通讯**——身份、寻址、因果、幂等与审计挂点；不携带业务语义。`project_id / conversation_id` 等业务维度随载荷走（业务信封由来源插件 / bot 协议定义）。接收 bot 拆信封后，按 `payload_ref` 从内核加密载荷存储**自行拉取**业务内容，内核不做上下文水合推送。
 
 `IngressEnvelope` 必填字段：
 
@@ -656,7 +677,7 @@ ingress_envelope
 ├── idempotency_key
 ├── received_at
 ├── payload_hash
-├── payload_ref          # 载荷引用（加密存储 / 快照），接收 bot 自行拉取
+├── payload_ref          # 载荷引用（加密存储），接收 bot 自行拉取
 └── policy_version       # 通讯策略版本，仅用于审计
 ```
 
@@ -709,28 +730,30 @@ kernel_context_snapshots
 5. 保留策略：审计日志长期保留；上下文快照按项目策略保留，过期只删快照、保留日志与 hash 作为审计墓碑。
 6. 访问控制：审计角色可查全量；用户只能查自己的 trace；Bot 与插件只能查授权项目范围，且查询行为本身也要审计。
 
-## 7. 正交记忆模型
+## 7. 记忆模型（plugin_memory 内部）
 
-记忆按 `owner_bot_id` 与 `project_id` 两个维度切分，形成四个象限；象限语义由显式 `visibility` 列表达并由数据库约束强制（见 8.3）。其中全局公理库物理上位于独立金库库，其余三个象限位于记忆库；两库统一经 Memory Gateway 访问（见 8.4）。
+> 本章描述记忆插件 `plugin_memory` 的内部设计，用于约束其实现与验收。**内核对本章内容一无所知**：不建表、不持有凭据、不装配上下文、不解释数据结构；记忆插件可独立替换或停用，内核行为不变。完整实现级设计见 `doc/MemoryPlugin/MemoryPlugin详细设计.md`。
 
-本章中的 Context Assembler 与 Memory Arbiter 均运行在 memory-worker 认知服务中，不属于内核；它们经 Memory Gateway 获取图谱只读快照，内核只提供版本化写入、晋升队列入队与失效事件投递等原语。
+记忆按 `owner_bot_id` 与 `project_id` 两个维度切分，形成四个象限；象限语义由显式 `visibility` 列表达并由插件库的 CHECK 约束强制（见 8.3）。其中全局公理库物理上位于独立金库 schema `vault`，其余三个象限位于记忆 schema `memory`；两库统一由记忆插件持有与访问。
+
+本章中的 Context Assembler 与 Memory Arbiter 均运行在 `plugin_memory` 内的 memory-worker 认知服务中；它们直接读取插件自己的图谱快照。版本化写入与晋升也由插件执行；内核只承接队列入队、事件投递与审计链路，不接触插件存储。
 
 | 象限 | 数据归属 | 内容 | 生命周期 |
 | --- | --- | --- | --- |
 | Bot 角色经验 | `visibility=bot_private`，owner 有值、project 为空 | 通用技能、偏好、跨项目踩坑 | 跟随 Bot |
 | 项目公共记忆 | `visibility=project_public`，owner 为空、project 有值 | 架构决策、表结构、目录说明、项目历史 | 跟随项目，可被任何 Bot 继承 |
 | 任务工作现场 | `visibility=ephemeral`，owner 与 project 均有值 | 当前修改位置、临时报错、执行状态 | 任务结束后蒸馏为经验，然后清理 |
-| 全局公理库 | 金库库，`visibility=global`，owner 与 project 均为空 | Obsidian 通用笔记、通用技术资料 | 跟随用户，Bot 只读经网关按需检索注入 |
+| 全局公理库 | `vault` schema，`visibility=global`，owner 与 project 均为空 | Obsidian 通用笔记、通用技术资料 | 跟随用户，Bot 经插件工具按需检索注入 |
 
 ### 7.1 读路径：上下文装配
 
-用户向 Bot 提问时，Context Assembler 经 Memory Gateway 读取记忆库与金库库，在调用 LLM 前组装三层上下文：
+用户向 Bot 提问时，`plugin_memory` 的 Context Assembler 读取记忆 schema 与金库 schema，在调用 LLM 前组装三层上下文：
 
 1. Bot 个人风格与技能偏好。
 2. 当前项目的图谱、架构决策、任务状态、Repo Map。
 3. 近期跨端输入，例如浏览器批注、VS Code 评论、相关 Obsidian 标签。
 
-装配目标是让 Bot “懂项目但不串项目”。
+装配目标是让 Bot “懂项目但不串项目”。装配结果作为一次性上下文工件返回给请求方 bot；内核不参与、不缓存、不推送。
 
 ### 7.2 写路径：记忆蒸馏与晋升
 
@@ -749,7 +772,7 @@ kernel_context_snapshots
 ```text
 Bot Private Workspace      # 每个 Bot 的临时草稿，不共享，不参与全局一致性
 Project Shared Memory      # 项目公共权威记忆，多 Bot 共享
-Memory Promotion Queue     # 草稿晋升为公共记忆的唯一入口
+Memory Promotion Queue     # 草稿晋升为公共记忆的唯一入口（plugin_memory 内部表）
 Context Read Snapshot      # Bot 任务开始时拿到的只读快照
 ```
 
@@ -757,11 +780,11 @@ Context Read Snapshot      # Bot 任务开始时拿到的只读快照
 
 1. Bot 在任务执行中只写自己的 `owner_bot_id + project_id + visibility=ephemeral` 工作现场。
 2. 任务结束后，由 Memory Arbiter 判断哪些内容可以晋升为项目公共事实。
-3. Bot 不能绕过晋升队列直接写公共记忆；`visibility=project_public` 的写权限只授予晋升队列消费者的专用数据库账号（见 8.3）。
+3. Bot 不能绕过晋升队列直接写公共记忆；`visibility=project_public` 的写权限只授予 `plugin_memory` 晋升队列消费者的专用数据库账号。
 4. 任务开始时生成只读上下文快照，记录当时依赖的公共记忆版本。
 5. 公共记忆变更必须在晋升事务内发布失效持久事件（见 6.7），提示其他 Bot 的旧上下文已过期；该提示不承担正确性职责，正确性由 7.4 的提交时版本检查唯一承担（见 7.5）。
 
-任务上下文建议记录：
+任务上下文记录（`plugin_memory` 内部，M4 起按 D-11 简化）：
 
 ```text
 task_id
@@ -769,19 +792,16 @@ project_id
 bot_id
 context_version
 involved_entity_ids
-snapshot_json
 ```
-
-这样能回答“这个 Bot 当时基于哪个版本的公共记忆做决策”，为后续冲突归因和审计提供依据。
 
 ### 7.4 并发写控制
 
 本节的提交时乐观锁版本检查是公共记忆一致性的唯一正确性来源：任何基于过期公共记忆的晋升写入，都必须在这里被拦截后进入合并或人工审查。失效事件（7.5）只是提示，不能替代或削弱本节检查。
 
-读可以并行，写必须分片控制。`kernel_entities` 增加 `version`，公共记忆更新使用乐观锁：
+读可以并行，写必须分片控制。`plugin_memory` 的实体表增加 `version`，公共记忆更新使用乐观锁：
 
 ```sql
-UPDATE kernel_entities
+UPDATE memory_entities
 SET content = :new_content,
     version = version + 1,
     updated_by_bot_id = :bot_id
@@ -796,7 +816,7 @@ WHERE entity_id = :entity_id
 
 ```sql
 -- 边集变更事务的第一步：乐观占位并递增源实体的 edge_epoch
-UPDATE kernel_entities
+UPDATE memory_entities
 SET edge_epoch = edge_epoch + 1
 WHERE entity_id = :source_id
   AND edge_epoch = :read_edge_epoch;
@@ -831,19 +851,18 @@ memory_entity_versions
 └── created_at
 ```
 
-公共记忆晋升成功后，内核发布持久事件：
+公共记忆晋升成功后，`plugin_memory` 经其本地 Outbox 发布持久事件（事件由 `memory_bot` 以投递委托回投内核）：
 
 ```text
-project.memory.updated
-project.memory.invalidated
-task.state.changed
+plugin_memory.memory.updated
+plugin_memory.memory.invalidated
 ```
 
-以上事件在晋升事务内写入 Outbox，经各 Consumer Group 的 `event.deliver` job 投递，至少一次送达；消费者以 `event_id` 幂等去重（见 6.7）。
+以上事件在晋升事务内写入插件本地 `memory_outbox`，经 `memory_bot` 回投内核后按各 Consumer Group 的 `event.deliver` job 投递，至少一次送达；消费者以 `event_id` 幂等去重（见 6.7）。
 
 其他 Bot 收到事件后：
 
-- 新任务重新拉取最新公共记忆。
+- 新任务重新呼叫 `plugin_memory` 获取最新公共记忆。
 - 进行中任务不承诺感知失效：LLM 调用持续数分钟且不可中断，各 Consumer Group 的消费顺序也不一致，因此事件最多用于 UI 提示（如“上下文可能已过期”），不改变任务执行行为。
 - 任务提交晋升时由 7.4 的乐观锁版本检查拦截过期写入，版本冲突进入 Memory Arbiter 的合并或人工审查流程。
 
@@ -851,31 +870,32 @@ task.state.changed
 
 | 机制 | 职责 | 保证级别 |
 | --- | --- | --- |
-| 提交时版本检查（7.4 乐观锁 + 冲突合并） | 拦截基于过期公共记忆的晋升写入 | 正确性唯一来源 |
-| `project.memory.invalidated` 事件 | 新任务拉取最新记忆、UI 过期提示 | 投递持久（6.7），语义尽力而为 |
+| 提交时版本检查（7.4 乐观锁 + 冲突合并，plugin_memory 内部） | 拦截基于过期公共记忆的晋升写入 | 正确性唯一来源 |
+| `plugin_memory.memory.invalidated` 事件 | 新任务拉取最新记忆、UI 过期提示 | 投递持久（6.7），语义尽力而为 |
 | 进行中任务 | 照常执行，不感知失效 | 无一致性承诺 |
 
 注意区分两个层面：该事件经 Outbox 持久投递（不丢、可重投），但语义是尽力而为的提示——收到不代表已正确处理，迟到或重复投递也不破坏一致性，因为正确性由版本检查独立兜底。任何组件不得把“已收到失效事件”当作正确性依据，也不得以“未收到”为由跳过版本检查。
 
 ## 8. 数据模型
 
-### 8.1 图谱边界：只存知识域
+### 8.1 数据边界：内核只存运行数据，知识归记忆插件
 
-初版方案使用 `memory_episodes / memory_nodes / memory_edges`。最终方案收敛边界：`kernel_entities / kernel_relations` 作为同一套逻辑 schema 部署两次——金库库只承载个人笔记与全局公理，记忆库承载项目知识、Bot 记忆与网页摘录；两库不共享连接与凭据，统一经 Memory Gateway 访问（见 8.4）。PM 任务、队列、项目等强结构数据不入图谱，各自使用类型化表，需要关联知识节点时通过 `entity_id` 引用。
+内核 schema `kernel` 只承载运行数据：队列、项目、插件、Bot、入口审计、健康报告与安全决策。知识域（个人笔记、全局公理、项目知识、Bot 记忆、网页摘录）全部属于记忆插件 `plugin_memory`，由其在 `memory` / `vault` 两个 schema 中自行组织，内核不建表、不授予任何账号、不读取。
 
-| 数据 | 是否入图谱 | 存储位置 |
+| 数据 | 是否在记忆插件 | 存储位置 |
 | --- | --- | --- |
-| 个人笔记、全局公理 | 是（金库图谱） | `kernel_entities / kernel_relations`（金库库，仅 `visibility=global`） |
-| 项目知识、Bot 记忆、网页摘录 | 是（记忆图谱） | `kernel_entities / kernel_relations`（记忆库，`bot_private / project_public / ephemeral`） |
-| wikilink、remembers、annotated_from、implemented_in 等知识关系 | 是（库内边） | `kernel_relations`；跨库引用见 8.4 |
+| 个人笔记、全局公理 | 是（金库图谱） | `vault.memory_entities / memory_relations`（仅 `visibility=global`） |
+| 项目知识、Bot 记忆、网页摘录 | 是（记忆图谱） | `memory.memory_entities / memory_relations`（`bot_private / project_public / ephemeral`） |
+| wikilink、remembers、annotated_from、implemented_in 等知识关系 | 是（库内边） | 插件 `memory_relations`；跨库引用见 8.4 |
 | PM 任务状态机与任务依赖 | 否 | `pm_tasks` / `pm_task_dependencies`（PM 插件类型化表） |
-| 队列、租约、死信 | 否 | `kernel_jobs` |
-| 项目、设备绑定 | 否 | `kernel_projects` |
+| 队列、租约、死信 | 否 | `kernel.kernel_jobs` |
+| 项目、设备绑定 | 否 | `kernel.kernel_projects` |
+| 入口审计、上下文快照、事件出箱 | 否 | `kernel.kernel_ingress_log / kernel_context_snapshots / kernel_event_outbox` |
 
-知识图谱表：
+知识图谱表（记忆插件 schema，逻辑同名双部署）：
 
 ```text
-kernel_entities
+memory_entities
 ├── entity_id
 ├── namespace       # VARCHAR，注册表校验：obsidian_note / bot_memory / web_clip
 ├── owner_bot_id
@@ -884,13 +904,13 @@ kernel_entities
 ├── title
 ├── content
 ├── metadata JSON   # 仅展示性扩展字段，检索与约束不得依赖
-├── embedding
+├── embedding       # M4 前不启用（D-11）
 ├── version
 ├── edge_epoch      # 边集并发控制（见 7.4）
 ├── updated_by_bot_id
 └── updated_at
 
-kernel_relations
+memory_relations
 ├── relation_id
 ├── source_id
 ├── target_id
@@ -927,27 +947,21 @@ kernel_projects
 ├── name
 ├── repo_uri
 ├── bound_agent_node
-├── obsidian_folder
 └── created_at
+
+bot_manifest / bots / bot_instances
+# Bot 制品、配置、运行实例；`memory_profile` 仅为声明字段（见 3.3.1）
 
 kernel_jobs
 # 完整字段见 6.5（含 correlation_id / causation_id 追踪字段）
-
-memory_entity_versions
-├── entity_id
-├── version
-├── content
-├── updated_by_bot_id
-├── source_task_id
-└── created_at
 ```
 
 注册与扩展规则：
 
-1. `namespace` 使用普通 VARCHAR，合法取值在插件注册时登记；禁止 ENUM，新增插件不得触发图谱表结构变更。
+1. `namespace` 使用普通 VARCHAR，合法取值在插件注册时登记；禁止 ENUM，新增插件不得触发内核或记忆插件的表结构变更。
 2. `metadata JSON` 只承载展示性扩展字段；任何被检索、过滤或约束依赖的字段，必须提升为类型化列或进入插件自己的表。
-3. 插件读取图谱走 Memory Gateway 只读接口；写入必须通过所属 namespace 的写接口，禁止跨 namespace 修改他人数据。
-4. 强结构插件表通过 `entity_id` 引用图谱节点；引用不复制内容，图谱节点删除时由插件自行处理引用清理。
+3. 知识写入必须通过 `plugin_memory` 工具：所属 namespace 的写接口，禁止跨 namespace 修改他人数据；内核不参与该授权。
+4. 强结构插件表通过 `entity_id` 引用知识节点；引用不复制内容，节点删除时由插件自行处理引用清理。
 
 ### 8.2 统一关系语义
 
@@ -964,27 +978,27 @@ PM 任务依赖（`blocks`）属于强结构业务数据，由 `pm_task_dependen
 
 边集变更（插入 / 失效 / 改权重）的并发控制采用 per-entity `edge_epoch`，见 7.4。
 
-### 8.3 记忆象限与数据层校验
+### 8.3 记忆象限与数据层校验（plugin_memory）
 
 象限语义由显式 `visibility` 列表达，不再依赖 NULL 组合推断：
 
-| `visibility` | `owner_bot_id` | `project_id` | 所在库 | 语义 |
+| `visibility` | `owner_bot_id` | `project_id` | 所在 schema | 语义 |
 | --- | --- | --- | --- | --- |
-| `global` | NULL | NULL | 金库库 | 全局公理库 |
-| `bot_private` | 有值 | NULL | 记忆库 | Bot 角色经验 |
-| `project_public` | NULL | 有值 | 记忆库 | 项目公共记忆 |
-| `ephemeral` | 有值 | 有值 | 记忆库 | 任务现场或 Bot 项目私有草稿 |
+| `global` | NULL | NULL | `vault` | 全局公理库 |
+| `bot_private` | 有值 | NULL | `memory` | Bot 角色经验 |
+| `project_public` | NULL | 有值 | `memory` | 项目公共记忆 |
+| `ephemeral` | 有值 | 有值 | `memory` | 任务现场或 Bot 项目私有草稿 |
 
-两个库各自用 CHECK 约束锁定允许的象限（MySQL 8.0.16+ 生效），金库不可能混入项目记忆，记忆库也不可能写入全局公理：
+两个 schema 各自用 CHECK 约束锁定允许的象限（MySQL 8.0.16+ 生效），金库不可能混入项目记忆，记忆库也不可能写入全局公理：
 
 ```sql
--- 金库库
-ALTER TABLE kernel_entities ADD CONSTRAINT chk_vault_visibility CHECK (
+-- vault schema
+ALTER TABLE memory_entities ADD CONSTRAINT chk_vault_visibility CHECK (
   visibility = 'global' AND owner_bot_id IS NULL AND project_id IS NULL
 );
 
--- 记忆库
-ALTER TABLE kernel_entities ADD CONSTRAINT chk_memory_visibility CHECK (
+-- memory schema
+ALTER TABLE memory_entities ADD CONSTRAINT chk_memory_visibility CHECK (
   (visibility = 'bot_private'    AND owner_bot_id IS NOT NULL AND project_id IS NULL) OR
   (visibility = 'project_public' AND owner_bot_id IS NULL     AND project_id IS NOT NULL) OR
   (visibility = 'ephemeral'      AND owner_bot_id IS NOT NULL AND project_id IS NOT NULL)
@@ -999,61 +1013,71 @@ ALTER TABLE kernel_entities ADD CONSTRAINT chk_memory_visibility CHECK (
 INDEX idx_memory_visibility (visibility, project_id, namespace, owner_bot_id)
 ```
 
-金库库的写权限只授予 Memory Gateway，Bot 与业务插件没有任何金库账号；网关内部再区分“用户直写”与“用户批准的晋升”两条路径，Bot 只保留只读授权。
+金库 schema 的写权限只授予 `plugin_memory` 的金库账号；Bot 与业务插件没有任何金库账号。插件内部再区分“用户直写”与“用户批准的晋升”两条路径，Bot 只保留只读工具授权。
 
 公共记忆的唯一写路径由数据库账号隔离强制：
 
-1. `visibility=project_public` 的 INSERT / UPDATE 权限只授予晋升队列消费者的专用数据库账号。
-2. hub 主账号、插件账号、Bot 运行时账号、memory-worker 普通读取账号均无此权限，绕过晋升队列的写入在数据库层直接被拒绝。
-3. 晋升事务内依次完成：7.4 版本检查 → 写入新版本 → 追加 `memory_entity_versions` → 同事务写入 Outbox 事件（6.7）。
+1. `visibility=project_public` 的 INSERT / UPDATE 权限只授予 `plugin_memory` 的晋升队列消费者专用账号。
+2. 内核账号、其他插件账号、Bot 运行时账号、memory-worker 普通读取账号均无此权限，绕过晋升队列的写入在数据库层直接被拒绝。
+3. 晋升事务内依次完成：7.4 版本检查 → 写入新版本 → 追加 `memory_entity_versions` → 同事务写入插件本地 Outbox 事件（6.7）。
 4. `entity_id + version` 唯一；版本冲突进入 Memory Arbiter 的合并或人工审查流程。
 
-### 8.4 存储分层与 Memory Gateway
+### 8.4 记忆插件的存储分层与凭据边界
 
-Gateway 数据面由 Memory Gateway（知识访问）与 Health Service（健康报告聚合，见 6.9）组成；两者共享身份、ACL、审计与限流。
+`plugin_memory` 是独立插件二进制（Go 知识服务 + Python memory-worker），持有 `memory` / `vault` 两个 schema 的全部账号；内核只持有 `kernel` schema 的运行表账号。Health 聚合属于 `monitor_bot`，不共享插件凭据。
 
 存储按“不可再生程度与敏感度”分层，而不是按插件分库：
 
 | 存储 | 内容 | 归属 | 访问方式 |
 | --- | --- | --- | --- |
-| 金库库 | 个人笔记、全局公理 | 用户 | 只有 Memory Gateway 持有凭据；Bot 只读；用户直写；晋升需用户批准 |
-| 记忆库 | 项目公共记忆、Bot 角色经验、任务现场，以及队列、项目等内核运行表 | memory service | 经 Memory Gateway；`project_public` 仅晋升队列可写 |
+| `vault` schema | 个人笔记、全局公理 | `plugin_memory` | 只有插件持有凭据；Bot 只读（经插件工具）；用户直写；晋升需用户批准 |
+| `memory` schema 图谱表 | 项目公共记忆、Bot 角色经验、任务现场 | `plugin_memory` | 经插件工具；`project_public` 仅晋升队列消费者专用账号可写 |
+| `kernel` schema | 队列、项目、插件、Bot、入口审计等运行数据 | hub | hub 运行账号只授权运行表，不接触任何知识数据 |
 | 插件类型化表 | PM 任务、任务依赖等业务强结构数据 | 对应插件 | 各持自己的账号；只保存 `entity_id` 引用 |
 
-为什么不按插件分库：项目公共记忆是多 Bot 的协作锚点（7.3）。如果 PM 插件与 Obsidian 插件各持一份项目记忆，两个 Bot 会读到互相矛盾的项目事实，Context Assembler 需要扇出到 N 个存储再合并，7.4 的版本检查也失去单一版本可比。因此“插件自己管理”的准确含义是：**memory service 统一持有项目与 Bot 记忆，业务插件只持有引用**。
+为什么不按插件分库：项目公共记忆是多 Bot 的协作锚点（7.3）。如果 PM 插件与 Obsidian 插件各持一份项目记忆，两个 Bot 会读到互相矛盾的项目事实，Context Assembler 需要扇出到 N 个存储再合并，7.4 的版本检查也失去单一版本可比。因此“插件自己管理”的准确含义是：**记忆插件统一持有项目与 Bot 记忆图谱，业务插件只持有引用**。
 
-Memory Gateway 的职责：
+`plugin_memory` 的职责：
 
-1. 认证与授权：复用 3.4 的插件身份与用户授权，按 `bot / project / namespace` 过滤每次请求。
-2. 路由：按 `visibility` 把读写送到金库库或记忆库；调用方不感知物理库。
-3. 晋升：接收晋升请求，校验 7.4 版本与用户批准，再写入目标库；跨库晋升是 saga（本地事务写 outbox → 审批 → 目标库写入 → 回写状态），重复请求按 idempotency key 去重。
-4. 审计：每次读写记录 `correlation_id`、`bot_id`、目标实体与结果。
-5. 出口控制：结果条数上限、禁止全量导出、批量导出需二次确认。
+1. 认证与授权：对每次工具调用校验调用 bot 身份，按 `bot / project / namespace` 过滤；工具调用授权仍由内核 3.4 前置批准。
+2. 路由：按 `visibility` 把读写送到 `vault` 或 `memory` schema；调用方不感知物理库。
+3. 晋升：接收晋升请求，校验 7.4 版本与用户批准，再写入目标库；跨 schema 晋升是插件内 saga（本地事务写 outbox → 审批 → 目标库写入 → 回写状态），重复请求按 idempotency key 去重。
+4. 审计：每次读写在目标 schema append-only 写入 `memory_audit_log`，记录 `correlation_id`、`bot_id`、目标实体与结果；不写内核的入口审计表。
+5. 事务性事件：图谱状态变更与 `memory_outbox` 同事务提交；Outbox 记录事件 ID、发起 `from_bot_id`、因果链、幂等键与载荷引用。
+6. 事件回投：`memory_outbox` dispatcher 使用 `memory_bot` 的单次投递委托，把事件作为该 bot 的 `IngressEnvelope` 送入 hub；hub 校验身份、因果链与幂等后进入内核 Outbox。插件自身不是总线主体，不注册业务 Bot 之外的身份，也不持有长期总线凭证。
+7. 出口控制：结果条数上限、禁止全量导出、批量导出需二次确认。
 
-API 面先冻结为六组，禁止 Bot 直接执行 SQL：
+工具面先冻结为六组，禁止其他组件直接执行 SQL：
 
 ```text
-read(entity_id)
-search(query, scope, limit)
-promote(source_entity_id, target_visibility, approval_id)
-subscribe(event_types, scope)
-audit(correlation_id)
-health()
+plugin_memory.read(entity_id)                     # 工具名 plugin_memory.read
+plugin_memory.search(query, scope, limit)
+plugin_memory.create(source_actor, entity_draft)  # 仅 web_clip 等允许写路径
+plugin_memory.promote(source_entity_id, target_visibility, approval_id)   # M4
+plugin_memory.assemble_context(bot_id, project_id, task_ref)              # M4
+plugin_memory.audit(correlation_id)
+plugin_memory.health
 ```
 
-跨库规则：
+跨 schema 规则：
 
 1. `entity_id` 使用 ULID/UUID，全局唯一，禁止各库自增。
-2. 只持久化库内边；跨库关系存为单向引用（目标 `entity_id` + 目标版本 + 内容 hash），查询时由网关解析。v1 不做分布式图遍历。
-3. 不存在跨库事务。跨库写入只能通过 saga + Outbox，按 `event_id` 幂等重试。
+2. 只持久化库内边；跨库关系存为单向引用（目标 `entity_id` + 目标版本 + 内容 hash），查询时由插件解析。v1 不做分布式图遍历。
+3. 不存在跨 schema 事务。跨 schema 写入只能通过 saga + 插件本地 Outbox，按 `event_id` 幂等重试。
 4. 金库不可用时降级为“无个人上下文”，项目任务照常运行；记忆库不可用时任务进入等待或 DLQ，不能静默丢上下文。
 
-跨库引用表放在记忆库一侧，金库不反向存项目引用：
+插件 Outbox 规则：
+
+1. 图谱事务成功而回投失败时，Outbox 保持 pending 并按指数退避重试；不允许把“调用成功后由 bot 自行补发事件”作为唯一路径。
+2. 投递委托绑定 `from_bot_id`、`correlation_id`、`event_type` 与 `idempotency_key`，不可复用；hub 仍以统一入口校验并记录接受 / 拒绝 / 重复。
+3. 插件不直接写 `kernel_jobs`、`kernel_event_outbox` 或 `kernel_ingress_log`，也不持有任何内核运行表账号。
+
+跨 schema 引用表放在记忆 schema 一侧，金库不反向存项目引用：
 
 ```text
-kernel_external_refs
+memory_external_refs
 ├── ref_id
-├── source_entity_id   # 记忆库实体
+├── source_entity_id   # 记忆 schema 实体
 ├── target_store       # vault
 ├── target_entity_id   # 金库实体
 ├── target_version
@@ -1061,7 +1085,7 @@ kernel_external_refs
 └── created_at
 ```
 
-部署节奏：MVP 用同一 MySQL 实例的两个 schema、两套凭据，Memory Gateway 先作为 hub 内的独立模块；边界稳定后再把金库库迁到独立实例，网关 API 不变。这样先拿到隔离收益，不提前承担第二套运维。
+部署节奏：MVP 用同一 MySQL 实例的三个 schema 与多套最小权限账号；`plugin_memory` 从 M3 起是独立二进制进程（与内核分开部署、分开暴露健康检查）。边界稳定后再把金库 schema 迁到独立实例，插件工具 API 不变。
 
 ## 9. 关键业务场景
 
@@ -1069,7 +1093,7 @@ kernel_external_refs
 
 1. 用户在内置浏览器中划词批注并 @某个 Bot。
 2. 浏览器插件生成 `ContextEnvelope`，包含 URL、TextQuoteSelector、DOM XPath、原文和用户指令。
-3. 内核经 Memory Gateway 在记忆库创建网页摘录节点。
+3. 浏览器插件（或其代理 bot）调用 `plugin_memory.create`，在记忆 schema 创建网页摘录节点。
 4. PM 插件监听事件，在自己的类型化任务表中创建任务，并通过 `entity_id` 引用网页摘录节点。
 5. Obsidian 插件可在项目笔记中生成双链节点。
 6. 图谱视图实时出现新节点与关系。
@@ -1077,12 +1101,12 @@ kernel_external_refs
 ### 9.2 VS Code 中执行远程任务
 
 1. 用户在 VS Code 中 @Bot 要求实现某个任务。
-2. Context Assembler 经 Memory Gateway 装配 Bot 偏好、项目记忆、相关批注和任务上下文。
+2. Bot 调用 `plugin_memory.assemble_context` 获取装配好的 Bot 偏好、项目记忆、相关批注和任务上下文。
 3. Hub 创建 Bot Runtime 任务与 Agent 任务，两个任务都进入持久化队列。
 4. Agent 执行修改、构建、测试，并流式回传。
 5. 原始日志进入冷存储，结构化摘要进入 Bot。
-6. 任务结果先写入 Bot 私有工作现场。
-7. Memory Arbiter 通过晋升队列与 Memory Gateway 写入项目公共记忆，成功后发布失效持久事件（同事务 Outbox）。
+6. 任务结果先写入 Bot 私有工作现场（经 `plugin_memory.create`，`visibility=ephemeral`）。
+7. Memory Arbiter（插件内）通过晋升队列写入项目公共记忆，成功后发布失效持久事件（同事务 Outbox）。
 8. 测试结论可晋升为 Bot 经验，临时现场被压缩或清理。
 
 ### 9.3 IM 随时查询与调度
@@ -1098,18 +1122,18 @@ kernel_external_refs
 
 - 左侧为 Activity Bar，插件以插槽方式挂载。
 - 主视区支持图谱、笔记、看板、浏览器、Bot 管理等独立模块。
-- 图谱可展示节点命中、记忆关系和任务依赖。
+- 图谱可展示节点命中、记忆关系和任务依赖（数据来自 `plugin_memory.search`）。
 - 浏览器支持划词批注、高亮恢复和批注卡片。
 
 ### 10.2 VS Code 插件
 
 - 使用原生 `vscode.comments` API 提供行内评论。
 - 捕获文件路径、行号、选中代码和上下文。
-- 与浏览器批注共享同一套记忆底座，实现“刚看过的资料”与“正在写的代码”联动。
+- 与浏览器批注共享同一套记忆底座（`plugin_memory`），实现“刚看过的资料”与“正在写的代码”联动。
 
 ### 10.3 Obsidian 文件同步：单向发布 + 变更摄取
 
-放弃“双向同步 / 双向 merge”表述。数据库图谱是 source of truth，本地 `.md` 文件库是它的单向投影：
+放弃“双向同步 / 双向 merge”表述。记忆插件中的图谱是 source of truth，本地 `.md` 文件库是它的单向投影：
 
 | 方向 | 机制 | 语义 |
 | --- | --- | --- |
@@ -1120,10 +1144,10 @@ kernel_external_refs
 
 1. File Watcher 监测 `.md` 变更（新建 / 修改 / 重命名 / 删除）。
 2. 变更封装为 `ContextEnvelope` 业务载荷（携带 file_path、内容 hash、上次同步基线 hash），经 bot 的 `IngressEnvelope` 进入 Ingress Queue，与其他入口共用同一条审核与因果链路。
-3. 摄取服务按 `file_path` 映射定位实体，携带实体当前 version 提交：
+3. 摄取服务（`plugin_obsidian`）经 `plugin_memory.create` 按 `file_path` 映射定位实体，携带实体当前 version 提交：
    - DB 内容 hash 等于上次同步基线 hash：无并发写，直接摄取。
    - 不相等：DB 与外部修改并发，以基线 hash 做三方合并；文本非重叠变更自动合并，重叠或结构冲突进入人工审查队列。
-4. 摄取成功后同事务更新实体版本并发布 `note.updated` 持久事件（6.7），Publisher 再把最新内容发布回文件。
+4. 摄取成功后同事务更新实体版本并发布 `plugin_obsidian.note.updated` 持久事件（6.7），Publisher 再把最新内容发布回文件。
 
 关键规则：
 
@@ -1133,61 +1157,62 @@ kernel_external_refs
 
 ## 11. 落地路线
 
-原 14 天 MVP 路线保留，但应按最终架构调整执行顺序：
-
 | 阶段 | 目标 | 关键交付 |
 | --- | --- | --- |
-| Step 0 | 微内核底座 | `kernel_projects`、`kernel_entities`、`kernel_relations`、金库库 / 记忆库双 schema、Memory Gateway 最小读写接口、插件注册协议（含身份凭证与用户授权订阅，见 3.4）、BotRuntime gRPC 控制面骨架（注册 / 心跳 / 任务流 / 事件订阅，见 5.4）、统一 `IngressEnvelope` 因果校验、`kernel_ingress_log` 与加密上下文快照（见 6.10）、事件总线、持久化 Job Table、Transaction Outbox、最小传输路由（TCP/UDP 会话） |
-| Step 1 | Bot 与队列管理 | 四角色骨架落位（`user_bot` 预置常驻，`create_bot / monitor_bot / security_bot` 工厂与监督链路，见 3.3.1）、业务 Bot 注册（插件侧 `xxx_bot / user_xxx_bot`）、配置 Prompt 与模型、绑定记忆空间、Bot 二进制制品与内核 supervisor、lazy / resident 双类型生命周期与激活策略（见 5.5）、插件权限授权与载荷 ACL、Health Service 报告入口与聚合窗口（见 6.9）、Consumer Group、重试、租约、DLQ、基础审核事件 |
-| Step 2 | 图谱与笔记 | 力导向图、Markdown 双链编辑、本地 `.md` 单向发布 + 变更摄取（见 10.3） |
+| Step 0 | 微内核底座 | hub 三类原语（队列 / 事件、Bot 注册与运行时、传输路由）、插件注册协议（含身份凭证与用户授权订阅，见 3.4）、BotRuntime gRPC 控制面骨架（注册 / 心跳 / 任务流 / 事件订阅，见 5.4）、统一 `IngressEnvelope` 因果校验、`kernel_ingress_log` 与加密上下文快照（见 6.10）、事件总线、持久化 Job Table、内核 Transaction Outbox、最小传输路由（反向 TCP）。**不含任何记忆能力** |
+| Step 1 | Bot 与队列管理 | 四角色骨架落位（`user_bot` 预置常驻，`create_bot / monitor_bot / security_bot` 工厂与监督链路，见 3.3.1）、业务 Bot 注册（插件侧 `xxx_bot / user_xxx_bot`）、配置 Prompt 与模型、Bot 二进制制品与内核 supervisor、lazy / resident 双类型生命周期与激活策略（见 5.5）、插件权限授权与载荷 ACL、健康报告入口与 `monitor_bot` 聚合（见 6.9）、Consumer Group、重试、租约、DLQ、基础审核事件 |
+| Step 2 | 记忆插件与笔记 | `plugin_memory` 作为首个复杂插件落地：knowledge 工具、memory/vault schema、图谱只读视图、Markdown 双链、本地 `.md` 单向发布 + 变更摄取（见 10.3） |
 | Step 3 | 输入通道 | 批注浏览器、VS Code 行内评论、统一业务载荷 `ContextEnvelope` + 通讯信封 `IngressEnvelope`（含完整因果链，见 6.10 / D-19）入口 |
 | Step 4 | Agent Mesh | 原生 TCP/UDP 会话、传输鉴权、插件协议注册与协商、工具 Manifest、健康上报（继承完整因果链）、流式回传、输出蒸馏、HITL 授权 |
-| Step 5 | 记忆闭环 | Context Assembler、上下文快照、`version` 乐观锁、版本历史、Memory Arbiter、记忆晋升、失效事件、临时现场清理 |
+| Step 5 | 记忆闭环 | `plugin_memory` 内 Context Assembler、上下文快照、`version` 乐观锁、版本历史、Memory Arbiter、记忆晋升、失效事件、临时现场清理 |
 | Step 6 | 外围业务 | PM 看板、IM 连接器、更多执行器和工具 |
 
 ## 12. 当前必须明确的工程决策
 
-1. **数据库版本与向量能力**：设计假设 MySQL 9.0+ 原生 `VECTOR`；如果实际环境不支持，需要确定降级方案。
-2. **图谱查询边界**：同一套逻辑图谱 schema 便于扩展，但跨库查询与复杂图遍历性能需要验证，必要时再考虑物化路径或图数据库，不应一开始引入 Neo4j。
+1. **插件内向量能力**：D-11 的向量侧表与 ANN 方案归 `plugin_memory`（M4），内核不关心；若实际环境不支持 `VECTOR`，在插件内做降级（关键词检索），不影响内核。
+2. **图谱查询边界**：memory schema 内复杂图遍历性能需要验证，必要时考虑物化路径或外部图存储；仍是插件内部决策，不应引入 Neo4j。
 3. **插件进程模型（Bot 侧已决策）**：Bot 采用独立二进制、内核创建、懒加载（见 5.5）；后端非 Bot 插件的进程隔离方式与前端插件的模块挂载方式仍待定。
-4. **权限与安全（插件侧已决策）**：插件身份凭证与用户授权订阅见 3.4（含载荷 ACL 与 Agent 可轮换凭证）；高危权威为“Agent 侧护栏最终放行 + hub 策略审核”。Bot 工具权限与跨设备访问的细粒度策略仍待 Step 0 注册协议落地时细化。
-5. **记忆晋升规则**：哪些内容晋升为项目记忆、Bot 经验或直接清理，需要有可解释的判定流程，避免自动写入错误知识。
-6. **多端一致性（已决策）**：数据库是 source of truth；Obsidian 文件为单向投影，外部修改经 File Watcher 摄取为信封，由三方合并 / 人工审查冲突流程处理（见 10.3）；PM 状态不与文件同步，仅消费 `note.updated` 等持久事件。
-7. **队列后端边界**：MVP 使用 MySQL Job Table，后续需要确认切换到 NATS、Redpanda 或 RabbitMQ 的触发条件，避免过早引入额外运维负担。
-8. **多 Bot 冲突裁决**：乐观锁冲突后，哪些内容可以自动合并、哪些必须人工审查，需要按记忆类型定义明确规则。
-9. **队列可观测性**：需要确定队列深度、重试率、死信率、Bot 消费延迟、Agent 任务耗时的指标与告警方案。
-10. **存储分层（已决策）**：个人笔记与全局公理独立金库库，凭据只授予 Memory Gateway；项目与 Bot 记忆由 memory service 持有，业务插件只保存 `entity_id` 引用，不按插件分库（见 8.4）。
-11. **传输层语义**：内核只保证 TCP/UDP 会话与最小传输信封；应用层可靠性、分片、重连与幂等由插件协议承担。MVP 只要求反向 TCP，UDP 的打洞或中继方案需要单独确认（见 5.1）。
+4. **权限与安全（插件侧已决策）**：插件身份凭证与用户授权订阅见 3.4（含载荷 ACL 与 Agent 可轮换凭证）；插件内部 ACL（如 `plugin_memory` 的三维过滤）由插件自行实现与审计。
+5. **记忆晋升规则**：哪些内容晋升为项目记忆、Bot 经验或直接清理，由 `plugin_memory` 给出可解释判定流程（M4）。
+6. **多端一致性（已决策）**：数据库是 source of truth；Obsidian 文件为单向投影，外部修改经 File Watcher 摄取为信封，由三方合并 / 人工审查冲突流程处理（见 10.3）；PM 状态不与文件同步，仅消费 `plugin_obsidian.note.updated` 等持久事件。
+7. **队列后端边界**：MVP 使用 MySQL Job Table，后续需要确认切换到 NATS、Redpanda 或 RabbitMQ 的触发条件。
+8. **多 Bot 冲突裁决**：乐观锁冲突后，哪些内容可以自动合并、哪些必须人工审查，由 `plugin_memory` 按记忆类型定义（M4）。
+9. **队列可观测性**：队列深度、重试率、死信率、Bot 消费延迟、Agent 任务耗时等由内核 `/metrics` 提供；记忆插件指标由插件自己暴露。
+10. **存储分层（已决策，D-22）**：记忆插件持有 `memory` / `vault` schema；内核只持 `kernel` schema 运行表；业务插件只保存 `entity_id` 引用，不按插件分库。
+11. **传输层语义**：内核只保证 TCP/UDP 会话与最小传输信封；应用层可靠性、分片、重连与幂等由插件协议承担。MVP 只要求反向 TCP。
 12. **Bot↔Kernel 控制面（已决策）**：gRPC 提供注册、心跳、任务流、事件订阅与凭证续期；Agent 执行协议仍由插件定义（见 5.4）。
-13. **健康报告链路（已决策）**：Gateway Health Service 聚合，内核策略校验并广播；单条 Bot 报告不能直接驱逐 Agent（见 6.9）。
+13. **健康报告链路（已决策，D-22 修订）**：报告走统一入口，`monitor_bot` 聚合；内核只做状态迁移与广播（见 6.9）。
 14. **全局可追溯（已决策）**：所有进入内核的消息必须携带 `correlation_id` / `causation_id` / `root_envelope_id` / `causal_path` / `traceparent` 并通过统一校验；日志记录完整结构化上下文与加密快照引用（见 6.10）。
-15. **Bot 运行形态（已决策）**：Bot 是独立二进制，由内核创建、监督与回收；分 lazy 与 resident 两种类型，内核按 `activation_mode` 激活。Lazy 首个任务或事件触发、空闲超过 `idle_ttl` 回收且不持有 Bot-Agent 长连接；Resident 常驻并持有长连接（见 5.5）。
+15. **Bot 运行形态（已决策）**：Bot 是独立二进制，由内核创建、监督与回收；分 lazy 与 resident 两种类型（见 5.5）。
+16. **记忆即插件（已决策，D-22）**：记忆与知识能力完整归 `plugin_memory`（knowledge 类插件）；内核与内核侧四角色不感知记忆；插件仍以独立二进制、独立 schema、独立凭据、独立生命周期运行。
 
 ## 13. 最终架构结论
 
 NexusCore 的核心竞争力不在某个单一功能，而在于五个统一：
 
-1. **统一数据底座**：知识域使用同一套逻辑图谱 schema，物理上分为金库库与记忆库，统一经 Memory Gateway 访问；PM 等强结构数据通过类型化表引用图谱节点。
+1. **统一数据底座**：知识域使用同一套逻辑图谱 schema，物理上分为金库与记忆库，由记忆插件单点持有；PM 等强结构数据通过类型化表引用图谱节点。
 2. **统一事件协议**：所有入口都转换为标准信封和事件。
 3. **统一执行边界**：所有物理操作都交给 Agent，Bot 只做决策。
-4. **统一记忆边界**：Bot 经验、项目资产、任务现场、全局资料正交分离。
+4. **统一记忆边界**：Bot 经验、项目资产、任务现场、全局资料正交分离，全部归记忆插件。
 5. **统一调度与一致性边界**：所有跨 Bot 消息、任务和记忆晋升都经过持久化队列、审核管道和版本化仲裁。
 
-在这五条统一之上，补一条内核边界：hub 只提供存储、队列、路由、注册四类原语；上下文装配、记忆仲裁与深度审核策略属于 memory-worker 与安全插件。这条边界一旦被侵蚀，修正成本会随插件数量线性放大。
+在这五条统一之上，补一条内核边界：hub 只提供队列、路由、注册三类原语；记忆与知识访问属于 `plugin_memory`，上下文装配与记忆仲裁属于插件内的 memory-worker，深度审核策略属于安全插件。这条边界一旦被侵蚀，修正成本会随插件数量线性放大。
 
-存储边界同样不可侵蚀：金库凭据只存在于 Memory Gateway，业务插件与 Bot 永远不直连金库；项目与 Bot 记忆由 memory service 单点持有，不按业务插件分库。
+存储边界同样不可侵蚀：记忆插件持有 `memory` / `vault` 凭据，内核与业务插件永远不直连知识存储；项目与 Bot 记忆由记忆插件单点持有，不按插件分库。
 
 传输边界同样不可侵蚀：内核只提供 TCP/UDP 会话与最小传输信封，不解释应用层消息；Bot 与 Agent 的语义协议由插件定义，内核不得重新引入 JSON-RPC 或 WebSocket 之类的统一应用层契约。
 
-控制面同样收敛：Bot↔内核只走 gRPC；健康报告由 Gateway Health Service 聚合，经内核策略校验后广播给专门 Bot 或用户。
+控制面同样收敛：Bot↔内核只走 gRPC；健康报告由统一入口进入，`monitor_bot` 聚合，经内核状态迁移后广播给专门 Bot 或用户。
 
-可追溯边界同样不可侵蚀：任何入口（用户、IM、VS Code、浏览器、Bot、Agent、Health Service）都不得绕过 `IngressEnvelope` 校验；缺失或不完整因果链的消息一律拒绝并记录，内核不替调用方补造历史。
+可追溯边界同样不可侵蚀：任何入口（用户、IM、VS Code、浏览器、Bot、Agent、健康报告）都不得绕过 `IngressEnvelope` 校验；缺失或不完整因果链的消息一律拒绝并记录，内核不替调用方补造历史。
 
-Bot 运行边界同样不可侵蚀：Bot 不是 hub 内嵌协程，而是内核创建和监管的独立二进制；业务插件不能自行拉起 Bot，Bot 也不持有长期状态，重启后从 memory service 与 job 队列恢复。Lazy Bot 不持有 Bot-Agent 长连接，Resident Bot 的长连接仍经 Agent Mesh，不绕过内核 ACL、因果链与审计。
+Bot 运行边界同样不可侵蚀：Bot 不是 hub 内嵌协程，而是内核创建和监管的独立二进制；业务插件不能自行拉起 Bot，Bot 也不持有长期状态，重启后从记忆插件与 job 队列恢复。Lazy Bot 不持有 Bot-Agent 长连接，Resident Bot 的长连接仍经 Agent Mesh，不绕过内核 ACL、因果链与审计。
 
 信封边界同样不可侵蚀：信封只承载通讯语义（身份、寻址、因果、幂等、审计挂点）；业务维度一律在载荷内由 bot 拆解，业务数据一律由 bot 自行拉取，内核不代填水合。
 
-只要这五条边界保持稳定，后续新增 IM、看板、浏览器、编辑器、远程执行器都只是增加插件，而不是修改内核。
+记忆边界同样不可侵蚀：记忆不是内核原语，也不是 Bot 固有属性，而是记忆插件的全部业务。删除记忆插件，内核仍作为队列与运行时底座独立运行；任何把记忆表、记忆 DSN、上下文装配写入内核的改动都视为架构错误。
+
+只要这些边界保持稳定，后续新增 IM、看板、浏览器、编辑器、远程执行器都只是增加插件，而不是修改内核。
 
 ## 14. 修订记录
 
@@ -1199,18 +1224,20 @@ Bot 运行边界同样不可侵蚀：Bot 不是 hub 内嵌协程，而是内核�
 | 2026-11-07 | 落实 D-05：新增 6.8 因果链（correlation_id / causation_id / traceparent 及传播规则）；6.6 改写为最小可序承诺（同 partition_key + 同 Consumer Group 内有序，跨队列只可追溯不保序）；`kernel_jobs` 与 outbox 表补追踪字段。涉及第 6.1、6.2、6.4、6.5、6.6、6.7、6.8 节。 | `NexusCore设计缺陷评审.md` D-05 |
 | 2026-11-07 | 落实 D-06：图谱收敛为知识域专用；新增 PM 类型化表（pm_tasks / pm_task_dependencies）与 entity_id 引用规则；namespace 改 VARCHAR + 注册表校验，metadata JSON 限定为展示性字段；8.2 移除 blocks 关系。涉及第 3.1、3.2、8.1、8.2、9.1、13 节。 | `NexusCore设计缺陷评审.md` D-06 |
 | 2026-11-07 | 落实 D-07：`scope` 列由显式 `visibility` 取代；8.3 新增 CHECK 约束（visibility 与 owner/project 组合强制自洽）、visibility 优先索引与公共记忆唯一写路径（project_public 写权限仅授予晋升队列消费者账号）；7.3 / 7.4 / 第 7 节象限表同步去除 NULL 语义推断。涉及第 7、7.3、7.4、8.1、8.3 节。 | `NexusCore设计缺陷评审.md` D-07 |
-| 2026-11-07 | 落实 D-08：`kernel_entities` 新增 `edge_epoch`；7.4 新增边集并发控制（乐观递增源实体 edge_epoch，新边插入与旧边失效同事务，双向边两端同校验）；并发写策略表新增关系边行。涉及第 7.4、8.1、8.2 节。 | `NexusCore设计缺陷评审.md` D-08 |
+| 2026-11-07 | 落实 D-08：`memory_entities` 新增 `edge_epoch`；7.4 新增边集并发控制（乐观递增源实体 edge_epoch，新边插入与旧边失效同事务，双向边两端同校验）；并发写策略表新增关系边行。涉及第 7.4、8.1、8.2 节。 | `NexusCore设计缺陷评审.md` D-08 |
 | 2026-11-07 | 落实 D-09：放弃“双向同步”，新增 10.3 节定义“单向发布 + 变更摄取”模型（DB 为 source of truth、watcher 信封化、基线 hash 三方合并、重命名保实体身份、删除待确认、wikilink 反向边由库侧维护）；Step 2 与工程决策 12.6 同步改写。涉及第 10.3、11、12 节。 | `NexusCore设计缺陷评审.md` D-09 |
 | 2026-11-07 | 落实 D-10：新增 3.4 信任边界——插件身份凭证（短期 token 可轮换）+ 用户逐项授权订阅（namespace/project/bot 三维过滤）+ 投递前载荷 ACL；Agent 改可轮换凭证并绑定能力与项目范围；高危权威定为 Agent 侧护栏，hub 审核为策略层；Step 0 / Step 1 交付同步纳入身份凭证、用户授权与载荷 ACL。涉及第 3.2、3.4、6.7、11、12 节。 | `NexusCore设计缺陷评审.md` D-10 |
-| 2026-11-07 | 落实 D-13：新增 8.4 存储分层与 Memory Gateway——金库库独立承载个人笔记与全局公理，凭据只授予网关；记忆库由 memory service 统一持有项目记忆与 Bot 记忆，业务插件只保存 `entity_id` 引用；冻结 read / search / promote / subscribe / audit / health 六组 API、跨库引用与 saga 规则、降级策略与两阶段部署节奏；8.3 拆成两份 CHECK 并强制 `visibility NOT NULL`，新增 `kernel_external_refs`。涉及第 1、3.1、3.2、4、7、7.1、8.1、8.3、8.4、13 节。 | `NexusCore设计缺陷评审.md` D-13 |
+| 2026-11-07 | 落实 D-13：新增 8.4 存储分层与 Memory Gateway——金库库独立承载个人笔记与全局公理，凭据只授予网关；记忆库由 memory service 统一持有项目记忆与 Bot 记忆；业务插件只保存 `entity_id` 引用；冻结 read / search / promote / subscribe / audit / health 六组 API、跨库引用与 saga 规则、降级策略与两阶段部署节奏。涉及第 1、3.1、3.2、4、7、7.1、8.1、8.3、8.4、13 节。 | `NexusCore设计缺陷评审.md` D-13 |
 | 2026-11-07 | 落实 D-14：第 5 节从“JSON-RPC over WebSocket”改为“内核只提供原生 TCP/UDP 传输，应用层协议由插件定义”；新增 5.1 传输层与应用层边界、最小 `transport_frame`、TCP/UDP 语义差异、反向连接与插件协议注册；任务四阶段改为 5.2，输出双层改为 5.3。涉及第 3.1、3.2、4、5、5.1、5.2、5.3、11、12、13 节。 | `NexusCore设计缺陷评审.md` D-14 |
-| 2026-11-07 | 落实 D-15：新增 5.4 Bot↔Kernel gRPC 控制面（Register / Heartbeat / StreamTasks / AckTask / SubscribeEvents / RenewCredential / Deregister）；新增 6.9 健康报告与故障广播（Gateway Health Service 聚合 → 内核策略校验与 Outbox → 事件总线 → 专门 Bot / 用户）；架构图增加 Bot 运行时、Health Service 与上报/广播边；8.4 声明 Gateway 由 Memory Gateway 与 Health Service 组成。涉及第 3.1、4、5.4、6.9、8.4、11、12、13 节。 | `NexusCore设计缺陷评审.md` D-15 |
-| 2026-11-07 | 落实 D-16：新增 6.10 全局可追溯与上下文日志——所有内核入口统一 `IngressEnvelope`，强制 `correlation_id` / `causation_id` / `root_envelope_id` / `causal_path` / `traceparent`；缺失即拒绝；新增 append-only `kernel_ingress_log` 与加密 `kernel_context_snapshots`，保证完整上下文可重建并脱敏。涉及第 3.1、5.4、6.1、6.8、6.9、6.10、11、12、13 节。 | `NexusCore设计缺陷评审.md` D-16 |
+| 2026-11-07 | 落实 D-15：新增 5.4 Bot↔Kernel gRPC 控制面；新增 6.9 健康报告与故障广播（聚合 → 内核策略校验与 Outbox → 事件总线 → 专门 Bot / 用户）；架构图增加 Bot 运行时、Health 服务与上报/广播边；8.4 声明 Gateway 由 Memory Gateway 与 Health Service 组成。涉及第 3.1、4、5.4、6.9、8.4、11、12、13 节。 | `NexusCore设计缺陷评审.md` D-15 |
+| 2026-11-07 | 落实 D-16：新增 6.10 全局可追溯与上下文日志——所有内核入口统一 `IngressEnvelope`，强制 `correlation_id` / `causation_id` / `root_envelope_id` / `causal_path` / `traceparent`；缺失即拒绝；新增 append-only `kernel_ingress_log` 与加密 `kernel_context_snapshots`。涉及第 3.1、5.4、6.1、6.8、6.9、6.10、11、12、13 节。 | `NexusCore设计缺陷评审.md` D-16 |
 | 2026-11-07 | 落实 D-17：Bot 改为独立二进制进程，由内核创建、监督、重启与空闲回收；新增 5.5 Bot 进程形态与懒加载（manifest、生命周期、`start_timeout` / `idle_ttl` / `max_instances` / `warm_pool`、冷启动与 drain 规则）；3.1、3.3、第 4 节架构图、6.2、6.9、Step 1、第 12 节与第 13 节同步。 | `NexusCore设计缺陷评审.md` D-17 |
 | 2026-11-07 | 落实 D-18：5.5 改为 Bot 双类型——lazy 按需激活、空闲回收、不持有 Bot-Agent 长连接；resident 常驻、持有长连接、不因空闲回收；内核按 `activation_mode` 维护 `desired_state` / `observed_state` 并 reconcile。补充 `agent_connection` / `min_instances` / `warm_pool` 字段与两类生命周期；3.1、3.3、4、5.4、6.2、6.9、Step 1、12、13 节同步。 | `NexusCore设计缺陷评审.md` D-18 |
 | 2026-11-08 | 新增 `doc/内核mvp/`：内核 MVP 实现级详细设计（10 模块、双库数据模型、gRPC / 网关 / 传输 / replay 人工确认契约、冒烟与验收标准；D-04 四语义并入调度器设计）。本文档继续作为上游总设计。 | `doc/内核mvp/内核MVP详细设计.md` |
 | 2026-11-09 | 落实 D-19：总线统一为 bot 通道——用户以 `user_bot` 身份在总线（常驻席位），客户端插件只是其投递 / 展示代理，只有 bot 能投递与消费消息；6.10 信封收敛为通讯职责（msg_type / from_bot_id / channel 等），业务维度移入载荷，接收 bot 自行拉取 `payload_ref` 并受拉取授权约束；日志表字段同步。 | `NexusCore设计缺陷评审.md` D-19 |
-| 2026-11-09 | 新增 `doc/开发规划.md`：单人开发整体规划（M0-M7 里程碑、估计 85-120 人日、停线点与砍单顺序、质量实践、风险对策；绑定既有验收清单）。 | `doc/开发规划.md` |
+| 2026-11-09 | 新增 `doc/开发规划.md`：单人开发整体规划（M0-M7 里程碑、估计、停线点与砍单顺序、质量实践、风险对策；绑定既有验收清单）。 | `doc/开发规划.md` |
 | 2026-11-10 | 落实 D-20：新增 3.3.1 Bot 角色体系——内核侧四角色（`user_bot / create_bot / monitor_bot / security_bot`）与插件侧业务 Bot（`xxx_bot / user_xxx_bot`）；插件注册 Bot、`create_bot` 读清单拉进程、`monitor_bot` 监督存续、`security_bot` 负责插件注册与热更新审查；3.1 原语 3 与 Step 1 同步。 | `NexusCore设计缺陷评审.md` D-20 |
 | 2026-11-10 | 新增 `doc/BotMvp/`：Bot MVP 实现级详细设计（内核侧四角色 / 插件侧 Bot 部署形态与生命周期、create_bot 决策面、monitor_bot 扫描、security_bot 审查与热更新、数据模型扩展、冒烟与验收标准）。本文档继续作为上游总设计。 | `doc/BotMvp/BotMvp详细设计.md` |
 | 2026-11-10 | 新增 `doc/PluginMvp/`：Plugin MVP 实现级详细设计（三类插件形态、manifest schema 冻结、命名与事件规范（G1 收口）、生命周期六态、数据迁移与卸载清理（G4/G5 最小解）、资源限制（G6）、安全链路、冒烟与验收标准）。本文档继续作为上游总设计。 | `doc/PluginMvp/PluginMvp详细设计.md` |
+| 2026-11-11 | 落实知识数据面拆分：hub 收敛为队列 / 事件、Bot 注册与运行时、传输路由三类原语；新增独立 `memory-gateway` 二进制边界，金库 DSN 与记忆库图谱表账号只归 gateway，hub 仅持有内核运行表账号；新增 Gateway 本地 Outbox 与调用方 bot 投递委托。涉及第 1、3.1、3.2、4、7、8.3、8.4、11、12、13 节。 | D-21 |
+| 2026-11-12 | 落实 D-22：**记忆即插件**。撤销 `memory-gateway` 数据面形态，记忆与知识能力（四象限记忆、金库、图谱、版本与晋升、Context Assembler、Memory Arbiter、用户级 Bot 个人记忆）完整归 knowledge 类插件 `plugin_memory`；内核与内核侧四角色不感知记忆；Health 聚合改由 `monitor_bot` 承担；内核 schema 与插件 schema 分离；事件改由插件本地 Outbox 经 `memory_bot` 投递委托回投；图谱表更名 `memory_*`。涉及第 1、3.1、3.2、3.3.1、4、5.2、6.1、6.7、6.8、6.9、7、8、9、10.3、11、12、13 节。 | `doc/NexusCore已修正问题归档.md` D-22 |

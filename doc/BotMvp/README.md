@@ -11,8 +11,12 @@
 ## 上游设计
 
 - 架构总设计：[../NexusCore架构设计总结.md](../NexusCore架构设计总结.md)（第 3.3 / 3.3.1 / 3.4 / 5.4 / 5.5 / 6.9 节为本文档的实现依据）
-- 内核 MVP：[../内核mvp/内核MVP详细设计.md](../内核mvp/内核MVP详细设计.md)（§3.6 scheduler / §3.10 supervisor / §5.1 BotRuntime 协议）
+- 内核 MVP：[../内核mvp/内核MVP详细设计.md](../内核mvp/内核MVP详细设计.md)（§3.5 scheduler / §3.9 supervisor / §5.0 BotRuntime 协议）
 - 开发规划：[../开发规划.md](../开发规划.md)（M2 = 本 Bot MVP 落地里程碑）
+
+## 相关设计
+
+- 用户级 Bot 默认个人记忆（`personal_stack_v1`）：[../MemoryPlugin/用户级Bot默认个人记忆架构.md](../MemoryPlugin/用户级Bot默认个人记忆架构.md)。该 profile 由记忆插件 `plugin_memory` 实现，内核只存储 `memory_profile` 声明、不解释；内核侧四角色不使用记忆。
 
 ## MVP 交付形态（一句话）
 

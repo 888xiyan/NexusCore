@@ -18,5 +18,5 @@ func main() {
 		fmt.Println("hub", version.Version)
 		os.Exit(0)
 	}
-	fmt.Println("hub", version.Version, "- 骨架就绪，服务器实现见内核 MVP 详设第 3 节（M1）")
+	fmt.Println("hub", version.Version, "- 骨架就绪，内核运行时实现见内核 MVP 详设（M1）；记忆与知识由插件 plugin_memory 承接（M3）")
 }
