@@ -10,7 +10,7 @@ NexusCore 是以微内核为基础的个人智能工作台：hub 只做队列 / 
 ## 2. 当前阶段
 
 - **M0 工程骨架**：完成。
-- **D-22 记忆插件化重构**：完成并已提交（commit `65f3901`）；尚未推送，见 §6。
+- **D-22 记忆插件化重构**：完成，commit `65f3901` 已推送（2026-11-12 核对 origin/main 一致）；`bot/` 目录另见提交 `1c8cbe9`（待推送）。
 - **M1 纯内核 MVP**：下一步开工（D-04 队列四语义 + `kernel` schema DDL + 纯内核冒烟链路）。
 - 设计文档已冻结；实现从 M1 开始，详见 `doc/开发规划.md`。
 
@@ -36,9 +36,15 @@ NexusCore 是以微内核为基础的个人智能工作台：hub 只做队列 / 
 - 2026-11-12 [已验证] `migrate.Probe` 曾未限定 `table_schema = DATABASE()`，同实例多 schema 时会误判 `_migrations` 存在；已修复 —— 证据: `internal/migrate/migrate.go`、commit `65f3901`。
 - 2026-11-12 [已验证] 文档重构后需 grep 旧术语（`Memory Gateway` / `memory-gateway` / `kernel_entities` / `gateway_outbox`）并检查相对链接，历史评审 / 归档 / 修订记录中的旧词可保留 —— 证据: 2026-11-12 D-22 重构验证流程。
 - 2026-11-12 [已验证] `bot/` 目录的 "agent" 指 AI 编码助手，与内核运行时 Bot 不是同一概念；写文档时注意区分 —— 证据: BOT.md 开头说明。
+- 2026-11-12 [过期] 开发规划人日估计自相矛盾：开头"约 350-450 人日"与里程碑表合计"约 90-120 人日"不一致 —— 已于 2026-11-12 修复（commit 109e5c2），开头统一为 90-120 人日。
+- 2026-11-12 [过期] cmd/migrate 帮助文本残留 D-22 前旧术语（nexus_memory、migrations/vault|memory、双库）—— 已于 2026-11-12 修复（commit 109e5c2），示例对齐 kernel。
+- 2026-11-12 [过期] BotMvp 详设引用内核 MVP 章节号错位（§3.6/§3.10/§5.1）—— 已于 2026-11-12 修复（commit 109e5c2），对齐 §3.5/§3.9/§5.0。
+- 2026-11-12 [过期] AGENTS.md"当前状态"中 M0"待提交"表述过时 —— 已于 2026-11-12 修复（commit 109e5c2），反映已提交并推送。
 
 ## 6. 进度日志（新→旧，最近 20 条）
 
+- 2026-11-12 11:53 qoder 修复四处文档漂移并提交 `109e5c2`（build/vet/test 全绿）；§5 对应条目标 [过期]；bot/ 记忆登记随本次提交入库。
+- 2026-11-12 11:43 qoder 通读全项目（设计文档 + 代码骨架 + bot/ 协议），build/vet/test 全绿；四处文档漂移记入 §5；核对 git：65f3901 已推送，bot/ 已提交为 1c8cbe9（待推送）。
 - 2026-11-12 建立多 agent 协作规范与记忆目录（`bot/BOT.md`、`bot/Bots.md`、`bot/claude/`、`bot/_template/`）。
 - 2026-11-12 D-22 记忆插件化全面重构完成并提交 `65f3901`（25 文件，+1092/−514）；**未推送**：沙箱无 SSH 凭据，需在宿主机执行 `git push origin main`。
 - 2026-11-12 新增 `doc/MemoryPlugin/` 详设；内核 MVP 详设重写为纯内核；`memory-gateway/` 迁移为 `plugins/plugin_memory/`。
@@ -46,7 +52,7 @@ NexusCore 是以微内核为基础的个人智能工作台：hub 只做队列 / 
 
 ## 7. 交接 / 待办
 
-- **P0**：在宿主机推送 `65f3901` 到 `origin/main`，确认远端与本地一致。
+- **P0**：推送本地领先提交到 `origin/main`（`1c8cbe9` bot/ 协作规范、`109e5c2` 漂移修复及本次 bot/ 登记提交）；`65f3901` 已推送。
 - **P0**：M1 第一项——`migrations/kernel` 全量 DDL（queue / bot / plugin / ingress / outbox / payload 表，含 CHECK 与 UNIQUE 约束）。
 - **P1**：M1 ingress 校验器（失败注入五例）与 `kernel_ingress_log` 同事务落库。
 - **P1**：M1 scheduler D-04 四语义（幂等键、租约续期、suspended、人工确认 replay CLI）。
