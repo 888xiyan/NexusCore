@@ -43,6 +43,7 @@ NexusCore 是以微内核为基础的个人智能工作台：hub 只做队列 / 
 
 ## 6. 进度日志（新→旧，最近 20 条）
 
+- 2026-11-12 11:56 qoder 推送 `1c8cbe9` / `109e5c2` / `457a59d` 到 origin/main，本地与远端一致；§7 推送交接移除。
 - 2026-11-12 11:53 qoder 修复四处文档漂移并提交 `109e5c2`（build/vet/test 全绿）；§5 对应条目标 [过期]；bot/ 记忆登记随本次提交入库。
 - 2026-11-12 11:43 qoder 通读全项目（设计文档 + 代码骨架 + bot/ 协议），build/vet/test 全绿；四处文档漂移记入 §5；核对 git：65f3901 已推送，bot/ 已提交为 1c8cbe9（待推送）。
 - 2026-11-12 建立多 agent 协作规范与记忆目录（`bot/BOT.md`、`bot/Bots.md`、`bot/claude/`、`bot/_template/`）。
@@ -52,7 +53,6 @@ NexusCore 是以微内核为基础的个人智能工作台：hub 只做队列 / 
 
 ## 7. 交接 / 待办
 
-- **P0**：推送本地领先提交到 `origin/main`（`1c8cbe9` bot/ 协作规范、`109e5c2` 漂移修复及本次 bot/ 登记提交）；`65f3901` 已推送。
 - **P0**：M1 第一项——`migrations/kernel` 全量 DDL（queue / bot / plugin / ingress / outbox / payload 表，含 CHECK 与 UNIQUE 约束）。
 - **P1**：M1 ingress 校验器（失败注入五例）与 `kernel_ingress_log` 同事务落库。
 - **P1**：M1 scheduler D-04 四语义（幂等键、租约续期、suspended、人工确认 replay CLI）。
