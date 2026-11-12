@@ -130,7 +130,7 @@ export MYSQL_VAULT_DSN="vault_user:pass@tcp(host:3306)/nexus_vault"
 
 | 里程碑 | 状态 |
 | --- | --- |
-| M0 工程骨架 | 已落地；D-22 重构已完成（内核 5 二进制 + `plugins/plugin_memory` 骨架 + `migrations/{kernel,plugins/plugin_memory}` 目录，待提交） |
+| M0 工程骨架 | 已完成（`c657459`）；D-22 记忆插件化重构已提交并推送（`65f3901`） |
 | M1 内核 MVP（纯内核） | 未开始（D-04 四语义是前置条件） |
 | M2 Bot 管理与插件运营 | 未开始（含 docker-compose、插件生命周期） |
 | M3+ | 未开始（记忆插件 v1 在 M3） |

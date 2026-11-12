@@ -1,7 +1,7 @@
 # NexusCore Bot MVP 详细设计
 
 > 版本：v0.1（2026-11-10）  
-> 上游设计：`../NexusCore架构设计总结.md`（§3.3 / 3.3.1 / 3.4 / 5.4 / 5.5 / 6.9）与 `../内核mvp/内核MVP详细设计.md`（§3.6 scheduler / §3.10 supervisor / §5.1 BotRuntime）  
+> 上游设计：`../NexusCore架构设计总结.md`（§3.3 / 3.3.1 / 3.4 / 5.4 / 5.5 / 6.9）与 `../内核mvp/内核MVP详细设计.md`（§3.5 scheduler / §3.9 supervisor / §5.0 BotRuntime）  
 > 状态：设计定稿，待实现
 
 ## 1. 目标与非目标
@@ -179,7 +179,7 @@ created_at / updated_at
 
 ## 7. 接口契约
 
-### 7.1 BotRuntime（复用，见内核 MVP 5.1）
+### 7.1 BotRuntime（复用，见内核 MVP 5.0）
 
 `Register / Heartbeat / StreamTasks / AckTask / SubscribeEvents / RenewCredential / Deregister`，无变化。
 

@@ -1,4 +1,4 @@
-// Command migrate 是双库迁移 CLI（up / down / probe），不依赖 golang-migrate 二进制。
+// Command migrate 是内核库迁移 CLI（up / down / probe），不依赖 golang-migrate 二进制。
 package main
 
 import (
@@ -16,8 +16,8 @@ import (
 func main() {
 	var (
 		cmdStr = flag.String("cmd", "probe", "up / down / probe")
-		dsn    = flag.String("dsn", "", "目标库 DSN，如 user:pass@tcp(host:3306)/nexus_memory")
-		dir    = flag.String("dir", "", "迁移目录 migrations/vault 或 migrations/memory")
+		dsn    = flag.String("dsn", "", "目标库 DSN，如 user:pass@tcp(host:3306)/nexus_kernel")
+		dir    = flag.String("dir", "", "迁移目录，如 migrations/kernel")
 		to     = flag.String("to", "", "迁移到的版本（可选）")
 	)
 	flag.Parse()
