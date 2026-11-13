@@ -1,0 +1,33 @@
+{
+  "plugin_id": "plugin_example",
+  "name": "Example Plugin",
+  "version": "1.0.0",
+  "plugin_type": "workspace",
+  "description": "NexusCore 示例插件模板",
+  "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_example",
+  "publishing": [
+    "plugin_example.custom.event"
+  ],
+  "subscribing": [
+    "chat.message.user",
+    "bot.reply"
+  ],
+  "providing_tools": [
+    "example.do_action"
+  ],
+  "requiring_tools": [],
+  "bot_templates": [
+    {
+      "bot_id": "example_bot",
+      "role": "plugin",
+      "display_name": "Example Bot",
+      "activation_mode": "resident",
+      "capabilities": [
+        "example",
+        "worker"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "binary_digest": "0000000000000000000000000000000000000000000000000000000000000000"
+}
