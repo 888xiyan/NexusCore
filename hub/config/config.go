@@ -464,6 +464,98 @@ func (m *Module) ListPending(ctx context.Context, actor Actor, scopeType string)
 	return out, rows.Err()
 }
 
+// List 供查看当前 active 的配置文档列表（受读取 ACL 约束）。
+func (m *Module) List(ctx context.Context, actor Actor, scopeType string) ([]Document, error) {
+	q := `SELECT doc_id, scope_type, scope_id, config_key, version, status, spec, schema_version,
+	             checksum, base_version, created_by, approved_by, approved_checksum, security_decision_id,
+	             created_at, approved_at, activated_at, retired_at
+	        FROM kernel_config_documents
+	       WHERE status = 'active'`
+	args := []any{}
+	if scopeType != "" {
+		q += ` AND scope_type=$1`
+		args = append(args, scopeType)
+	}
+	q += ` ORDER BY scope_type, scope_id`
+	rows, err := m.st.Pool().Query(ctx, q, args...)
+	if err != nil {
+		return nil, fmt.Errorf("列出 active 配置: %w", err)
+	}
+	defer rows.Close()
+	var out []Document
+	for rows.Next() {
+		d, err := scanDoc(rows)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkReadACL(actor, d); err == nil {
+			out = append(out, *d)
+		}
+	}
+	return out, rows.Err()
+}
+
+// GetProposal 根据 doc_id 读取提案文档。
+func (m *Module) GetProposal(ctx context.Context, actor Actor, proposalID string) (*Document, error) {
+	if actor.ID != UserBot && actor.ID != SecurityBot {
+		return nil, fmt.Errorf("%w: 只有 user_bot / security_bot 能查看提案详情", ErrForbidden)
+	}
+	row := m.st.Pool().QueryRow(ctx, `
+		SELECT doc_id, scope_type, scope_id, config_key, version, status, spec, schema_version,
+		       checksum, base_version, created_by, approved_by, approved_checksum, security_decision_id,
+		       created_at, approved_at, activated_at, retired_at
+		  FROM kernel_config_documents WHERE doc_id=$1`, proposalID)
+	doc, err := scanDoc(row)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, fmt.Errorf("%w: proposal_id %s", ErrNotFound, proposalID)
+	}
+	return doc, err
+}
+
+// Diff 返回提案与 base 版本（或 active 版本）的差异对比。
+func (m *Module) Diff(ctx context.Context, actor Actor, proposalID string) (map[string]any, error) {
+	prop, err := m.GetProposal(ctx, actor, proposalID)
+	if err != nil {
+		return nil, err
+	}
+	var baseDoc *Document
+	if prop.BaseVersion != nil && *prop.BaseVersion > 0 {
+		baseDoc, _ = docByVersion(ctx, m.st.Pool(), prop.ScopeType, prop.ScopeID, prop.ConfigKey, *prop.BaseVersion)
+	}
+	if baseDoc == nil {
+		baseDoc, _ = activeDoc(ctx, m.st.Pool(), prop.ScopeType, prop.ScopeID, prop.ConfigKey)
+	}
+	res := map[string]any{
+		"proposal": prop,
+		"checksum": prop.Checksum,
+	}
+	if baseDoc != nil {
+		res["base"] = baseDoc
+	}
+	return res, nil
+}
+
+// AddSecret 在 kernel_secret_refs 登记新的凭据引用（只存引用定位，不存明文值）。
+func (m *Module) AddSecret(ctx context.Context, actor Actor, provider, locator, description string) (string, error) {
+	if actor.ID != UserBot {
+		return "", fmt.Errorf("%w: 只有 user_bot 能登记 secret_ref", ErrForbidden)
+	}
+	if provider != "env" && provider != "file" && provider != "keyring" {
+		return "", fmt.Errorf("provider 必须是 env / file / keyring，收到 %q", provider)
+	}
+	if locator == "" {
+		return "", errors.New("locator 不能为空")
+	}
+	refID := newID("sec_")
+	_, err := m.st.Pool().Exec(ctx, `
+		INSERT INTO kernel_secret_refs (ref_id, provider, locator, description, created_by)
+		VALUES ($1, $2, $3, $4, $5)`, refID, provider, locator, description, actor.ID)
+	if err != nil {
+		return "", fmt.Errorf("登记 secret_ref: %w", err)
+	}
+	return refID, nil
+}
+
 // Rollback 生成新提案（spec 取旧版本），仍走 review/approve/activate，保证审计线性。
 func (m *Module) Rollback(ctx context.Context, actor Actor, scopeType, scopeID, configKey string, toVersion int64) (string, error) {
 	if configKey == "" {
@@ -671,6 +763,9 @@ func intOf(m map[string]any, key string, def int) int {
 
 // checkReadACL 实现 ConfigCenter §5.2 的读取范围。
 func checkReadACL(actor Actor, doc *Document) error {
+	if actor.ID == UserBot {
+		return nil // user_bot 拥有全量读取权限，含 pending
+	}
 	if actor.Kind == KindKernelRole {
 		switch actor.ID {
 		case UserBot:

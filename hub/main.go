@@ -22,7 +22,9 @@ import (
 	"github.com/888xiyan/NexusCore/hub/grpcd"
 	"github.com/888xiyan/NexusCore/hub/httpapi"
 	"github.com/888xiyan/NexusCore/hub/ingress"
+	"github.com/888xiyan/NexusCore/hub/monitor"
 	"github.com/888xiyan/NexusCore/hub/outbox"
+	"github.com/888xiyan/NexusCore/hub/plugin"
 	"github.com/888xiyan/NexusCore/hub/registry"
 	"github.com/888xiyan/NexusCore/hub/scheduler"
 	"github.com/888xiyan/NexusCore/hub/store"
@@ -113,7 +115,7 @@ func run(ctx context.Context, opt options) error {
 
 	router := transport.NewRouter(st, reg)
 	sup := supervisor.New(st, reg, sched, cfg, supervisor.Options{
-		GRPCAddr: opt.grpcAddr, TransportAddr: opt.transportAddr, ReconcileInterval: opt.reconcile,
+		GRPCAddr: opt.grpcAddr, HTTPAddr: opt.httpAddr, TransportAddr: opt.transportAddr, ReconcileInterval: opt.reconcile,
 	})
 	router.OnViolation = func(peer, reason string) {
 		fmt.Fprintf(os.Stderr, "transport 违规 peer=%s: %s\n", peer, reason)
@@ -124,8 +126,13 @@ func run(ctx context.Context, opt options) error {
 		return err
 	}
 
+	pm := plugin.NewManager(st, cfg, sup, reg)
 	api := httpapi.New(st, reg, ing, sched, cfg, disp, router)
+	api.SetPluginManager(pm)
+	api.SetSupervisor(sup)
 	api.FixtureBinder = func(ctx context.Context) error { return bindFixture(ctx, st, opt.botBinary) }
+
+	mon := monitor.New(st, sup, cfg, 5*time.Second)
 
 	gs := grpc.NewServer()
 	grpcd.NewServer(st, reg, ing, sched, bus, sup, scheduler.DefaultLeaseTTL, 200*time.Millisecond).RegisterService(gs)
@@ -156,6 +163,7 @@ func run(ctx context.Context, opt options) error {
 	start("transport", func() error { return router.Serve(ctx, trLn) })
 	start("httpapi", func() error { return api.Server(ctx, opt.httpAddr) })
 	start("supervisor", func() error { return sup.Run(ctx) })
+	start("monitor", func() error { return mon.Run(ctx) })
 	start("outbox", func() error { return disp.Run(ctx) })
 	start("queue", func() error { return queueLoop(ctx, st, sched, opt.wakeupPoll) })
 

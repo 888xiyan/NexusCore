@@ -14,6 +14,7 @@ import (
 	"net"
 	"net/http"
 	"os"
+	"os/exec"
 	"os/signal"
 	"strconv"
 	"sync"
@@ -23,6 +24,7 @@ import (
 	"github.com/888xiyan/NexusCore/hub/supervisor"
 	"github.com/888xiyan/NexusCore/hub/transport"
 	"github.com/888xiyan/NexusCore/internal/envelope"
+	"github.com/888xiyan/NexusCore/internal/osproc"
 	"github.com/888xiyan/NexusCore/internal/version"
 	pb "github.com/888xiyan/NexusCore/proto/gen/v1"
 	"google.golang.org/grpc"
@@ -39,6 +41,9 @@ func main() {
 		idleTTL       = flag.Int("idle-ttl", 300, "无任务空闲多久后自退出（秒）")
 		configVersion = flag.Int64("config-version", 0, "启动时加载的配置版本")
 		agentID       = flag.String("agent-id", "loopback_agent", "echo 工具的目标 Agent")
+		pluginID      = flag.String("plugin-id", "", "所属插件 ID（若为 owner bot 则 exec 插件进程）")
+		pluginBinary  = flag.String("plugin-binary", "", "插件进程独立二进制路径")
+		pluginDigest  = flag.String("plugin-digest", "", "插件进程制品摘要")
 		showVersion   = flag.Bool("version", false, "打印版本号")
 	)
 	flag.Parse()
@@ -71,6 +76,7 @@ func main() {
 		id: *botID, cred: cred, client: client, httpBase: "http://" + *hubHTTP,
 		transportAddr: *hubTransport, agentID: *agentID, configVersion: *configVersion,
 		idleTTL: time.Duration(*idleTTL) * time.Second,
+		pluginID: *pluginID, pluginBinary: *pluginBinary, pluginDigest: *pluginDigest,
 	}
 	if err := b.register(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "Register 失败:", err)
@@ -78,10 +84,18 @@ func main() {
 	}
 	fmt.Fprintf(os.Stderr, "bot-runtime %s ready (config_version=%d)\n", b.id, b.configVersion)
 
+	if b.pluginBinary != "" {
+		if err := b.startPluginProcess(ctx); err != nil {
+			fmt.Fprintf(os.Stderr, "owner bot exec 插件进程失败: %v\n", err)
+		}
+	}
+
 	go b.heartbeatLoop(ctx)
 	if err := b.runTasks(ctx); err != nil && ctx.Err() == nil {
 		fmt.Fprintln(os.Stderr, "任务流结束:", err)
 	}
+	// 先子后父：退出前优雅关闭插件进程（PluginMvp §6.4）
+	b.stopPluginProcess()
 	_ = b.deregister(context.WithoutCancel(ctx))
 }
 
@@ -94,6 +108,14 @@ type bot struct {
 	agentID       string
 	configVersion int64
 	idleTTL       time.Duration
+
+	pluginID     string
+	pluginBinary string
+	pluginDigest string
+	childCmd     *exec.Cmd
+	childPID     int
+	childPGID    int
+	childStart   int64
 
 	mu     sync.Mutex
 	leases map[string]string // job_id -> lease_token
@@ -134,6 +156,91 @@ func (b *bot) deregister(ctx context.Context) error {
 	return err
 }
 
+func (b *bot) startPluginProcess(ctx context.Context) error {
+	cmd := exec.Command(b.pluginBinary)
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Stdout = os.Stderr
+	cmd.Stderr = os.Stderr
+	if err := cmd.Start(); err != nil {
+		_ = b.reportPluginProcess("failed", 0, 0, 0, err.Error())
+		return err
+	}
+	info, err := osproc.ReadProcessInfo(cmd.Process.Pid)
+	if err != nil {
+		_ = cmd.Process.Kill()
+		return err
+	}
+	b.childCmd = cmd
+	b.childPID = info.PID
+	b.childPGID = info.PGRP
+	b.childStart = info.StartTime
+
+	_ = b.reportPluginProcess("running", info.PID, info.PGRP, info.StartTime, "")
+
+	go func() {
+		err := cmd.Wait()
+		state := "stopped"
+		lastErr := ""
+		if err != nil {
+			state = "crashed"
+			lastErr = err.Error()
+		}
+		_ = b.reportPluginProcess(state, b.childPID, b.childPGID, b.childStart, lastErr)
+	}()
+	return nil
+}
+
+func (b *bot) stopPluginProcess() {
+	if b.childCmd != nil && b.childCmd.Process != nil && b.childPID > 0 {
+		_ = osproc.KillProcessGroup(b.childPGID, syscall.SIGTERM)
+		done := make(chan struct{})
+		go func() {
+			for i := 0; i < 20; i++ {
+				if !osproc.IsProcessAlive(b.childPID, b.childStart) {
+					close(done)
+					return
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+			_ = osproc.KillProcessGroup(b.childPGID, syscall.SIGKILL)
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(3 * time.Second):
+			_ = osproc.KillProcessGroup(b.childPGID, syscall.SIGKILL)
+		}
+		_ = b.reportPluginProcess("stopped", b.childPID, b.childPGID, b.childStart, "")
+	}
+}
+
+func (b *bot) reportPluginProcess(state string, pid, pgid int, startTime int64, lastErr string) error {
+	rep := map[string]any{
+		"plugin_id":      b.pluginID,
+		"owner_bot_id":   b.id,
+		"pid":            pid,
+		"pgid":           pgid,
+		"pid_start_time": startTime,
+		"binary_digest":  b.pluginDigest,
+		"config_version": b.configVersion,
+		"state":          state,
+		"last_error":     lastErr,
+	}
+	body, _ := json.Marshal(rep)
+	req, err := http.NewRequest(http.MethodPost, b.httpBase+"/v1/plugins/process/report", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Nexus-Credential", b.cred)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	return nil
+}
+
 func (b *bot) heartbeatLoop(ctx context.Context) {
 	ticker := time.NewTicker(10 * time.Second)
 	defer ticker.Stop()
@@ -168,7 +275,7 @@ func (b *bot) runTasks(ctx context.Context) error {
 		b.mu.Lock()
 		idle := time.Since(b.last)
 		b.mu.Unlock()
-		if idle > b.idleTTL {
+		if b.idleTTL > 0 && idle > b.idleTTL {
 			fmt.Fprintf(os.Stderr, "bot %s 空闲超过 %s，自退出\n", b.id, b.idleTTL)
 			return nil
 		}

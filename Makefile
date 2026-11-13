@@ -1,7 +1,7 @@
 BIN_DIR := bin
 PLUGIN_BIN_DIR := bin/plugins
 
-.PHONY: build build-plugins test test-pg vet fmt proto migrate-probe migrate-up migrate-down smoke-empty smoke-m1 drill-crash-m1 clean
+.PHONY: build build-plugins test test-pg vet fmt proto migrate-probe migrate-up migrate-down compose-up compose-down smoke-empty smoke-m1 smoke-m2 drill-crash-m1 clean
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -15,7 +15,8 @@ build:
 build-plugins:
 	@mkdir -p $(PLUGIN_BIN_DIR)
 	@go build -o $(PLUGIN_BIN_DIR)/plugin_memory ./plugins/plugin_memory
-	@echo "build-plugins ok: $(PLUGIN_BIN_DIR)/plugin_memory"
+	@go build -o $(PLUGIN_BIN_DIR)/plugin_demo ./plugins/plugin_demo
+	@echo "build-plugins ok: $(PLUGIN_BIN_DIR)/{plugin_memory,plugin_demo}"
 
 test:
 	@go test ./...
@@ -75,9 +76,21 @@ migrate-down:
 smoke-empty: migrate-probe
 	@echo "smoke-empty ok（无库环境为跳过模式）"
 
+# M2：docker-compose 管理本地 PostgreSQL 16+ 环境
+compose-up:
+	@docker compose up -d
+	@echo "PostgreSQL 16+ 已启动 (端口 $${NEXUS_DEV_PG_PORT:-55432})"
+
+compose-down:
+	@docker compose down
+
 # M1 验收：九步冒烟链路 + 边界验收 + 兜底轮询（详设 §8.1 / §8.4 / §8.6）
 smoke-m1:
 	@./scripts/smoke-m1.sh
+
+# M2 验收：Bot 管理、配置审批全链路、插件生命周期与两级进程、DLQ 与 Health
+smoke-m2:
+	@./scripts/smoke-m2.sh
 
 # M1 验收：真实 SIGKILL 崩溃恢复演练（详设 §6.8 / §8.4）
 drill-crash-m1:

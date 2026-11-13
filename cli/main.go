@@ -1,19 +1,23 @@
-// Command cli 是用户(user_bot)的投递与管理代理：M1 的第一个用户界面。
-// 依据：内核 MVP 详设 §5.2 / §6.1、开发规划原则 2（CLI 先于 UI）。
+// Command cli 是用户(user_bot)的投递与管理代理：M1 的第一个用户界面与 M2 的全套运营客户端。
+// 依据：内核 MVP 详设 §5.2 / §6.1、BotMvp §7.3、PluginMvp §11、ConfigCenter §7。
 // CLI 不是总线主体：它以 user_bot 身份投递信封，凭证由 hub 启动时签发。
 package main
 
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -40,89 +44,173 @@ func main() {
 		fmt.Println("cli", version.Version)
 		return
 	}
-	fs := flag.NewFlagSet(cmd, flag.ExitOnError)
-	httpBase := fs.String("hub-http", defaultHTTP, "hub HTTP 入口")
-	grpcAddr := fs.String("hub-grpc", defaultGRPC, "hub gRPC 控制面")
-	credFile := fs.String("credential-file", defaultCredFile, "user_bot 凭证文件")
-	text := fs.String("text", "", "要投递的文本")
-	botID := fs.String("bot", "echo_bot", "目标 Bot")
-	wait := fs.Bool("wait", false, "投递后等待回复事件")
-	timeout := fs.Duration("timeout", 60*time.Second, "等待超时")
-	jobID := fs.Int64("job", 0, "任务 ID")
-	decision := fs.String("decision", "", "continue / replay / discard")
-	kind := fs.String("kind", "bot", "凭证主体类型")
-	subject := fs.String("subject", "", "凭证主体 ID")
-	group := fs.String("group", "user_bot", "Consumer Group")
-	_ = fs.Parse(os.Args[2:])
+
+	httpBase := getEnvOr("NEXUS_HUB_HTTP", defaultHTTP)
+	grpcAddr := getEnvOr("NEXUS_HUB_GRPC", defaultGRPC)
+	credFile := getEnvOr("NEXUS_CREDENTIAL_FILE", defaultCredFile)
+
+	// 处理全局参数提取（支持在任何位置指定 -hub-http 或 -credential-file）
+	filteredArgs := make([]string, 0, len(os.Args)-2)
+	for i := 2; i < len(os.Args); i++ {
+		arg := os.Args[i]
+		if arg == "-hub-http" && i+1 < len(os.Args) {
+			httpBase = os.Args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "-hub-http=") {
+			httpBase = strings.TrimPrefix(arg, "-hub-http=")
+		} else if arg == "-hub-grpc" && i+1 < len(os.Args) {
+			grpcAddr = os.Args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "-hub-grpc=") {
+			grpcAddr = strings.TrimPrefix(arg, "-hub-grpc=")
+		} else if arg == "-credential-file" && i+1 < len(os.Args) {
+			credFile = os.Args[i+1]
+			i++
+		} else if strings.HasPrefix(arg, "-credential-file=") {
+			credFile = strings.TrimPrefix(arg, "-credential-file=")
+		} else {
+			filteredArgs = append(filteredArgs, arg)
+		}
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
-	cred, err := readCredential(*credFile)
-	if err != nil && cmd != "help" {
+	cred, err := readCredential(credFile)
+	if err != nil && cmd != "help" && cmd != "-h" && cmd != "--help" {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
 	}
 
 	switch cmd {
 	case "send":
+		fs := flag.NewFlagSet("send", flag.ExitOnError)
+		text := fs.String("text", "", "要投递的文本")
+		botID := fs.String("bot", "echo_bot", "目标 Bot")
+		wait := fs.Bool("wait", false, "投递后等待回复事件")
+		timeout := fs.Duration("timeout", 60*time.Second, "等待超时")
+		_ = fs.Parse(filteredArgs)
 		if *text == "" {
 			fmt.Fprintln(os.Stderr, "send 需要 -text")
 			os.Exit(2)
 		}
-		if err := doSend(ctx, *httpBase, cred, *botID, *text, *wait, *timeout, *grpcAddr); err != nil {
+		if err := doSend(ctx, httpBase, cred, *botID, *text, *wait, *timeout, grpcAddr); err != nil {
 			fmt.Fprintln(os.Stderr, "投递失败:", err)
 			os.Exit(1)
 		}
+
 	case "resume-list":
-		if err := doGet(ctx, *httpBase+"/v1/jobs/suspended", cred); err != nil {
+		if err := doGet(ctx, httpBase+"/v1/jobs/suspended", cred); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+
 	case "resume-confirm":
+		fs := flag.NewFlagSet("resume-confirm", flag.ExitOnError)
+		jobID := fs.Int64("job", 0, "任务 ID")
+		decision := fs.String("decision", "", "continue / replay / discard")
+		_ = fs.Parse(filteredArgs)
 		if *jobID == 0 || *decision == "" {
 			fmt.Fprintln(os.Stderr, "resume-confirm 需要 -job 与 -decision（continue/replay/discard）")
 			os.Exit(2)
 		}
 		body, _ := json.Marshal(map[string]string{"decision": *decision})
-		if err := doPost(ctx, fmt.Sprintf("%s/v1/jobs/%d/resume", *httpBase, *jobID), cred, body); err != nil {
+		if err := doPost(ctx, fmt.Sprintf("%s/v1/jobs/%d/resume", httpBase, *jobID), cred, body); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+
 	case "replay":
+		fs := flag.NewFlagSet("replay", flag.ExitOnError)
+		jobID := fs.Int64("job", 0, "任务 ID")
+		_ = fs.Parse(filteredArgs)
 		if *jobID == 0 {
 			fmt.Fprintln(os.Stderr, "replay 需要 -job")
 			os.Exit(2)
 		}
-		if err := doPost(ctx, fmt.Sprintf("%s/v1/jobs/%d/replay", *httpBase, *jobID), cred, []byte("{}")); err != nil {
+		if err := doPost(ctx, fmt.Sprintf("%s/v1/jobs/%d/replay", httpBase, *jobID), cred, []byte("{}")); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+
 	case "fixture":
-		if err := doPost(ctx, *httpBase+"/v1/dev/fixture", cred, []byte("{}")); err != nil {
+		if err := doPost(ctx, httpBase+"/v1/dev/fixture", cred, []byte("{}")); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+
 	case "credential":
+		fs := flag.NewFlagSet("credential", flag.ExitOnError)
+		kind := fs.String("kind", "bot", "凭证主体类型")
+		subject := fs.String("subject", "", "凭证主体 ID")
+		_ = fs.Parse(filteredArgs)
 		if *subject == "" {
 			fmt.Fprintln(os.Stderr, "credential 需要 -subject")
 			os.Exit(2)
 		}
 		body, _ := json.Marshal(map[string]string{"kind": *kind, "subject": *subject})
-		if err := doPost(ctx, *httpBase+"/v1/credentials", cred, body); err != nil {
+		if err := doPost(ctx, httpBase+"/v1/credentials", cred, body); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+
 	case "subscribe":
-		if err := doSubscribe(ctx, *grpcAddr, cred, *group, ""); err != nil {
+		fs := flag.NewFlagSet("subscribe", flag.ExitOnError)
+		group := fs.String("group", "user_bot", "Consumer Group")
+		_ = fs.Parse(filteredArgs)
+		if err := doSubscribe(ctx, grpcAddr, cred, *group, ""); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+
 	case "metrics":
-		if err := doGet(ctx, *httpBase+"/metrics", ""); err != nil {
+		if err := doGet(ctx, httpBase+"/metrics", ""); err != nil {
 			fmt.Fprintln(os.Stderr, err)
 			os.Exit(1)
 		}
+
+	// M2: 配置中心 CLI
+	case "config":
+		if err := handleConfig(ctx, httpBase, cred, filteredArgs); err != nil {
+			fmt.Fprintln(os.Stderr, "config 错误:", err)
+			os.Exit(1)
+		}
+
+	// M2: Bot 管理 CLI
+	case "bot":
+		if err := handleBot(ctx, httpBase, cred, filteredArgs); err != nil {
+			fmt.Fprintln(os.Stderr, "bot 错误:", err)
+			os.Exit(1)
+		}
+
+	// M2: create-bot pull
+	case "create-bot":
+		if err := handleCreateBot(ctx, httpBase, cred, filteredArgs); err != nil {
+			fmt.Fprintln(os.Stderr, "create-bot 错误:", err)
+			os.Exit(1)
+		}
+
+	// M2: 插件生命周期与进程 CLI
+	case "plugin":
+		if err := handlePlugin(ctx, httpBase, cred, filteredArgs); err != nil {
+			fmt.Fprintln(os.Stderr, "plugin 错误:", err)
+			os.Exit(1)
+		}
+
+	// M2: security CLI 契约 (BotMvp §7.3)
+	case "security-list", "security-approve", "security-revoke":
+		if err := handleSecurity(ctx, httpBase, cred, cmd, filteredArgs); err != nil {
+			fmt.Fprintln(os.Stderr, "security 错误:", err)
+			os.Exit(1)
+		}
+
+	// M2: DLQ 运营 CLI
+	case "dlq":
+		if err := handleDLQ(ctx, httpBase, cred, filteredArgs); err != nil {
+			fmt.Fprintln(os.Stderr, "dlq 错误:", err)
+			os.Exit(1)
+		}
+
 	case "help", "-h", "--help":
 		usage()
 	default:
@@ -132,23 +220,556 @@ func main() {
 	}
 }
 
+func getEnvOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
 func usage() {
 	fmt.Fprint(os.Stderr, `NexusCore cli（user_bot 的投递与管理代理）
 
 用法：cli <子命令> [参数]
 
+【核心投递与总线】
   send            -text "..." [-bot echo_bot] [-wait] [-timeout 60s]
-  subscribe       [-group user_bot] [-timeout 60s]
+  subscribe       [-group user_bot]
   resume-list     列出挂起任务与副作用清单
   resume-confirm  -job N -decision continue|replay|discard
   replay          -job N（DLQ 重放，必经人工确认）
-  fixture         绑定 M1 冒烟夹具二进制（M2 起由插件 install 取代）
   credential      -kind bot|agent|plugin -subject ID
   metrics         查看内核指标
+
+【M2: 配置中心】
+  config list [--scope plugin|bot|agent|global]
+  config get <scope_type> <scope_id> [--version N] [--key default]
+  config history <scope_type> <scope_id> [--key default]
+  config propose --file spec.json --scope <type> --id <scope_id> [--base-version N]
+  config diff <proposal_id>
+  config review <proposal_id> --decision approved|rejected [--reason "..."]
+  config approve <proposal_id> --checksum <sha256>
+  config reject <proposal_id> --reason "..."
+  config activate <proposal_id>
+  config rollback <scope_type> <scope_id> --to <version>
+  config pending [--scope <type>]
+  config secret add --provider env|file|keyring --locator NAME [--description "..."]
+  config set --file spec.json --scope <type> --id <scope_id>  # 一次完成提案、审批、激活
+
+【M2: Bot 管理】
+  bot create -id <bot_id> [-name <display_name>] [-mode lazy|resident] [-prompt <ref>] [-model <m>]
+  bot list
+  bot enable <bot_id> [--mode lazy|resident] [--enabled true|false]
+  create-bot pull
+
+【M2: 插件运营与进程控制】
+  plugin install <manifest.json>
+  plugin list
+  plugin upgrade <manifest.json>
+  plugin disable <plugin_id>
+  plugin uninstall <plugin_id> [--confirm] [--keep]
+  plugin ps
+  plugin stop <plugin_id>
+  plugin start <plugin_id>
+  plugin kill <plugin_id> --confirm [--reason "..."]
+  security-list [pending]
+  security-approve <decision_id>
+  security-revoke <decision_id> --reason "..."
+
+【M2: DLQ 运营】
+  dlq list
+  dlq replay -job N
+  dlq archive -job N
 
 公共参数：-hub-http / -hub-grpc / -credential-file
 `)
 }
+
+// ---------------------- M2: 配置中心实现 ----------------------
+
+func handleConfig(ctx context.Context, httpBase, cred string, args []string) error {
+	if len(args) == 0 {
+		return errors.New("缺少 config 子命令 (list, get, history, propose, diff, review, approve, reject, activate, rollback, pending, secret, set)")
+	}
+	sub := args[0]
+	rest := args[1:]
+
+	switch sub {
+	case "list":
+		fs := flag.NewFlagSet("config list", flag.ExitOnError)
+		scope := fs.String("scope", "", "过滤范围 (plugin, bot, agent, global)")
+		_ = fs.Parse(rest)
+		url := httpBase + "/v1/config/list"
+		if *scope != "" {
+			url += "?scope=" + *scope
+		}
+		return doGet(ctx, url, cred)
+
+	case "get":
+		if len(rest) < 2 {
+			return errors.New("用法: config get <scope_type> <scope_id> [--version N] [--key default]")
+		}
+		st := rest[0]
+		sid := rest[1]
+		fs := flag.NewFlagSet("config get", flag.ExitOnError)
+		ver := fs.Int64("version", 0, "版本号（默认 active）")
+		key := fs.String("key", "default", "配置键")
+		_ = fs.Parse(rest[2:])
+		url := fmt.Sprintf("%s/v1/config/get?scope_type=%s&scope_id=%s&key=%s", httpBase, st, sid, *key)
+		if *ver > 0 {
+			url += fmt.Sprintf("&version=%d", *ver)
+		}
+		return doGet(ctx, url, cred)
+
+	case "history":
+		if len(rest) < 2 {
+			return errors.New("用法: config history <scope_type> <scope_id> [--key default]")
+		}
+		st := rest[0]
+		sid := rest[1]
+		fs := flag.NewFlagSet("config history", flag.ExitOnError)
+		key := fs.String("key", "default", "配置键")
+		_ = fs.Parse(rest[2:])
+		url := fmt.Sprintf("%s/v1/config/history?scope_type=%s&scope_id=%s&key=%s", httpBase, st, sid, *key)
+		return doGet(ctx, url, cred)
+
+	case "propose":
+		fs := flag.NewFlagSet("config propose", flag.ExitOnError)
+		file := fs.String("file", "", "spec JSON 文件路径")
+		scope := fs.String("scope", "", "范围类型 (plugin, bot, agent, global)")
+		id := fs.String("id", "", "主体 ID")
+		key := fs.String("key", "default", "配置键")
+		baseVer := fs.Int64("base-version", 0, "基准版本号")
+		_ = fs.Parse(rest)
+		if *file == "" || *scope == "" || *id == "" {
+			return errors.New("config propose 需要 --file, --scope, --id")
+		}
+		data, err := os.ReadFile(*file)
+		if err != nil {
+			return fmt.Errorf("读取配置文件: %w", err)
+		}
+		body, _ := json.Marshal(map[string]any{
+			"scope_type":   *scope,
+			"scope_id":     *id,
+			"config_key":   *key,
+			"spec":         json.RawMessage(data),
+			"base_version": *baseVer,
+		})
+		return doPost(ctx, httpBase+"/v1/config/propose", cred, body)
+
+	case "diff":
+		if len(rest) == 0 {
+			return errors.New("用法: config diff <proposal_id>")
+		}
+		return doGet(ctx, httpBase+"/v1/config/diff/"+rest[0], cred)
+
+	case "review":
+		if len(rest) == 0 {
+			return errors.New("用法: config review <proposal_id> --decision approved|rejected [--reason \"...\"]")
+		}
+		propID := rest[0]
+		fs := flag.NewFlagSet("config review", flag.ExitOnError)
+		dec := fs.String("decision", "approved", "审核决定")
+		reason := fs.String("reason", "security_bot review", "审核原因")
+		_ = fs.Parse(rest[1:])
+		body, _ := json.Marshal(map[string]string{
+			"proposal_id": propID,
+			"decision":   *dec,
+			"reason":     *reason,
+		})
+		return doPost(ctx, httpBase+"/v1/config/review", cred, body)
+
+	case "approve":
+		if len(rest) == 0 {
+			return errors.New("用法: config approve <proposal_id> --checksum <sha256>")
+		}
+		propID := rest[0]
+		fs := flag.NewFlagSet("config approve", flag.ExitOnError)
+		csum := fs.String("checksum", "", "待批准配置的 sha256 checksum")
+		_ = fs.Parse(rest[1:])
+		if *csum == "" {
+			return errors.New("config approve 必须提供 --checksum 校验和")
+		}
+		body, _ := json.Marshal(map[string]string{
+			"proposal_id": propID,
+			"checksum":    *csum,
+		})
+		return doPost(ctx, httpBase+"/v1/config/approve", cred, body)
+
+	case "reject":
+		if len(rest) == 0 {
+			return errors.New("用法: config reject <proposal_id> --reason \"...\"")
+		}
+		propID := rest[0]
+		fs := flag.NewFlagSet("config reject", flag.ExitOnError)
+		reason := fs.String("reason", "rejected by user", "驳回原因")
+		_ = fs.Parse(rest[1:])
+		body, _ := json.Marshal(map[string]string{
+			"proposal_id": propID,
+			"reason":      *reason,
+		})
+		return doPost(ctx, httpBase+"/v1/config/reject", cred, body)
+
+	case "activate":
+		if len(rest) == 0 {
+			return errors.New("用法: config activate <proposal_id>")
+		}
+		propID := rest[0]
+		body, _ := json.Marshal(map[string]string{
+			"proposal_id": propID,
+		})
+		return doPost(ctx, httpBase+"/v1/config/activate", cred, body)
+
+	case "rollback":
+		if len(rest) < 2 {
+			return errors.New("用法: config rollback <scope_type> <scope_id> --to <version>")
+		}
+		st := rest[0]
+		sid := rest[1]
+		fs := flag.NewFlagSet("config rollback", flag.ExitOnError)
+		to := fs.Int64("to", 0, "回滚到的版本号")
+		key := fs.String("key", "default", "配置键")
+		_ = fs.Parse(rest[2:])
+		if *to <= 0 {
+			return errors.New("config rollback 必须提供 --to <version>")
+		}
+		body, _ := json.Marshal(map[string]any{
+			"scope_type": st,
+			"scope_id":   sid,
+			"config_key": *key,
+			"to_version": *to,
+		})
+		return doPost(ctx, httpBase+"/v1/config/rollback", cred, body)
+
+	case "pending":
+		fs := flag.NewFlagSet("config pending", flag.ExitOnError)
+		scope := fs.String("scope", "", "过滤范围")
+		_ = fs.Parse(rest)
+		url := httpBase + "/v1/config/pending"
+		if *scope != "" {
+			url += "?scope=" + *scope
+		}
+		return doGet(ctx, url, cred)
+
+	case "secret":
+		if len(rest) < 2 || rest[0] != "add" {
+			return errors.New("用法: config secret add --provider env|file|keyring --locator NAME [--description \"...\"]")
+		}
+		fs := flag.NewFlagSet("config secret add", flag.ExitOnError)
+		provider := fs.String("provider", "env", "提供者 (env, file, keyring)")
+		locator := fs.String("locator", "", "定位符")
+		desc := fs.String("description", "", "描述")
+		_ = fs.Parse(rest[1:])
+		if *locator == "" {
+			return errors.New("config secret add 需要 --locator")
+		}
+		body, _ := json.Marshal(map[string]string{
+			"provider":    *provider,
+			"locator":     *locator,
+			"description": *desc,
+		})
+		return doPost(ctx, httpBase+"/v1/config/secret", cred, body)
+
+	case "set":
+		// set 是交互式便利命令：propose -> diff -> approve -> activate
+		fs := flag.NewFlagSet("config set", flag.ExitOnError)
+		file := fs.String("file", "", "spec JSON 文件路径")
+		scope := fs.String("scope", "", "范围类型")
+		id := fs.String("id", "", "主体 ID")
+		key := fs.String("key", "default", "配置键")
+		baseVer := fs.Int64("base-version", 0, "基准版本号")
+		_ = fs.Parse(rest)
+		if *file == "" || *scope == "" || *id == "" {
+			return errors.New("config set 需要 --file, --scope, --id")
+		}
+		data, err := os.ReadFile(*file)
+		if err != nil {
+			return err
+		}
+		// 1. Propose
+		pBody, _ := json.Marshal(map[string]any{
+			"scope_type":   *scope,
+			"scope_id":     *id,
+			"config_key":   *key,
+			"spec":         json.RawMessage(data),
+			"base_version": *baseVer,
+		})
+		pResp, err := postAndReturn(ctx, httpBase+"/v1/config/propose", cred, pBody)
+		if err != nil {
+			return fmt.Errorf("提案失败: %w", err)
+		}
+		var pResult struct {
+			ProposalID string `json:"proposal_id"`
+		}
+		_ = json.Unmarshal(pResp, &pResult)
+		if pResult.ProposalID == "" {
+			return fmt.Errorf("提案未返回 proposal_id: %s", string(pResp))
+		}
+		fmt.Fprintf(os.Stderr, "提案已创建: %s\n", pResult.ProposalID)
+
+		// 2. Diff & Checksum
+		dResp, err := getAndReturn(ctx, httpBase+"/v1/config/diff/"+pResult.ProposalID, cred)
+		if err != nil {
+			return fmt.Errorf("获取 diff 失败: %w", err)
+		}
+		var dResult struct {
+			Checksum string `json:"checksum"`
+		}
+		_ = json.Unmarshal(dResp, &dResult)
+		fmt.Fprintf(os.Stderr, "提案 checksum: %s\n", dResult.Checksum)
+
+		// 3. Approve
+		aBody, _ := json.Marshal(map[string]string{
+			"proposal_id": pResult.ProposalID,
+			"checksum":    dResult.Checksum,
+		})
+		if err := doPost(ctx, httpBase+"/v1/config/approve", cred, aBody); err != nil {
+			return fmt.Errorf("批准失败: %w", err)
+		}
+
+		// 4. Activate
+		actBody, _ := json.Marshal(map[string]string{"proposal_id": pResult.ProposalID})
+		if err := doPost(ctx, httpBase+"/v1/config/activate", cred, actBody); err != nil {
+			return fmt.Errorf("激活失败: %w", err)
+		}
+		fmt.Println("配置已激活并生效")
+		return nil
+
+	default:
+		return fmt.Errorf("未知 config 子命令: %s", sub)
+	}
+}
+
+// ---------------------- M2: Bot 管理实现 ----------------------
+
+func handleBot(ctx context.Context, httpBase, cred string, args []string) error {
+	if len(args) == 0 {
+		return errors.New("缺少 bot 子命令 (create, list, enable)")
+	}
+	sub := args[0]
+	rest := args[1:]
+
+	switch sub {
+	case "create":
+		fs := flag.NewFlagSet("bot create", flag.ExitOnError)
+		id := fs.String("id", "", "Bot ID (^[a-z0-9_]{5,64}$)")
+		name := fs.String("name", "", "显示名称")
+		mode := fs.String("mode", "lazy", "activation_mode (lazy/resident)")
+		prompt := fs.String("prompt", "", "prompt 引用")
+		model := fs.String("model", "", "模型规格")
+		profile := fs.String("profile", "", "记忆 profile (用户自建默认 personal_stack_v1)")
+		_ = fs.Parse(rest)
+		if *id == "" {
+			return errors.New("bot create 需要 -id")
+		}
+		if *name == "" {
+			*name = *id
+		}
+		body, _ := json.Marshal(map[string]any{
+			"bot_id":          *id,
+			"display_name":    *name,
+			"activation_mode": *mode,
+			"capabilities":    []string{"echo"},
+			"prompt_ref":      *prompt,
+			"model":           *model,
+			"memory_profile":  *profile,
+		})
+		return doPost(ctx, httpBase+"/v1/bots", cred, body)
+
+	case "list":
+		return doGet(ctx, httpBase+"/v1/bots", cred)
+
+	case "enable":
+		if len(rest) == 0 {
+			return errors.New("用法: bot enable <bot_id> [--mode lazy|resident] [--enabled true|false]")
+		}
+		botID := rest[0]
+		fs := flag.NewFlagSet("bot enable", flag.ExitOnError)
+		mode := fs.String("mode", "", "activation_mode")
+		enabled := fs.Bool("enabled", true, "是否启用")
+		_ = fs.Parse(rest[1:])
+		body, _ := json.Marshal(map[string]any{
+			"mode":    *mode,
+			"enabled": *enabled,
+		})
+		return doPost(ctx, fmt.Sprintf("%s/v1/bots/%s/enable", httpBase, botID), cred, body)
+
+	default:
+		return fmt.Errorf("未知 bot 子命令: %s", sub)
+	}
+}
+
+func handleCreateBot(ctx context.Context, httpBase, cred string, args []string) error {
+	if len(args) == 0 || args[0] != "pull" {
+		return errors.New("用法: create-bot pull")
+	}
+	return doPost(ctx, httpBase+"/v1/create-bot/pull", cred, []byte("{}"))
+}
+
+// ---------------------- M2: 插件管理实现 ----------------------
+
+func handlePlugin(ctx context.Context, httpBase, cred string, args []string) error {
+	if len(args) == 0 {
+		return errors.New("缺少 plugin 子命令 (install, list, upgrade, disable, uninstall, ps, stop, start, kill)")
+	}
+	sub := args[0]
+	rest := args[1:]
+
+	switch sub {
+	case "install":
+		if len(rest) == 0 {
+			return errors.New("用法: plugin install <manifest.json>")
+		}
+		data, err := os.ReadFile(rest[0])
+		if err != nil {
+			return fmt.Errorf("读取插件清单: %w", err)
+		}
+		return doPost(ctx, httpBase+"/v1/plugins/install", cred, data)
+
+	case "list":
+		return doGet(ctx, httpBase+"/v1/plugins", cred)
+
+	case "upgrade":
+		if len(rest) == 0 {
+			return errors.New("用法: plugin upgrade <manifest.json>")
+		}
+		data, err := os.ReadFile(rest[0])
+		if err != nil {
+			return fmt.Errorf("读取插件清单: %w", err)
+		}
+		return doPost(ctx, httpBase+"/v1/plugins/upgrade", cred, data)
+
+	case "disable":
+		if len(rest) == 0 {
+			return errors.New("用法: plugin disable <plugin_id>")
+		}
+		return doPost(ctx, httpBase+"/v1/plugins/"+rest[0]+"/disable", cred, []byte("{}"))
+
+	case "uninstall":
+		if len(rest) == 0 {
+			return errors.New("用法: plugin uninstall <plugin_id> [--confirm] [--keep]")
+		}
+		pluginID := rest[0]
+		fs := flag.NewFlagSet("plugin uninstall", flag.ExitOnError)
+		confirm := fs.Bool("confirm", false, "清理元数据与表")
+		keep := fs.Bool("keep", false, "保留类型化表")
+		_ = fs.Parse(rest[1:])
+		body, _ := json.Marshal(map[string]bool{"confirm": *confirm, "keep": *keep})
+		return doPost(ctx, httpBase+"/v1/plugins/"+pluginID+"/uninstall", cred, body)
+
+	case "ps":
+		return doGet(ctx, httpBase+"/v1/plugins/processes", cred)
+
+	case "stop":
+		if len(rest) == 0 {
+			return errors.New("用法: plugin stop <plugin_id>")
+		}
+		return doPost(ctx, httpBase+"/v1/plugins/"+rest[0]+"/process/stop", cred, []byte("{}"))
+
+	case "start":
+		if len(rest) == 0 {
+			return errors.New("用法: plugin start <plugin_id>")
+		}
+		return doPost(ctx, httpBase+"/v1/plugins/"+rest[0]+"/process/start", cred, []byte("{}"))
+
+	case "kill":
+		if len(rest) == 0 {
+			return errors.New("用法: plugin kill <plugin_id> --confirm [--reason \"...\"]")
+		}
+		pluginID := rest[0]
+		fs := flag.NewFlagSet("plugin kill", flag.ExitOnError)
+		confirm := fs.Bool("confirm", false, "必须提供二次确认")
+		reason := fs.String("reason", "user_bot_force_kill", "终止原因")
+		_ = fs.Parse(rest[1:])
+		if !*confirm {
+			return errors.New("plugin kill 必须提供 --confirm 二次确认 (PluginMvp §6.5 规则 2)")
+		}
+		body, _ := json.Marshal(map[string]any{"confirm": *confirm, "reason": *reason})
+		return doPost(ctx, httpBase+"/v1/plugins/"+pluginID+"/process/kill", cred, body)
+
+	default:
+		return fmt.Errorf("未知 plugin 子命令: %s", sub)
+	}
+}
+
+func handleSecurity(ctx context.Context, httpBase, cred, cmd string, args []string) error {
+	switch cmd {
+	case "security-list":
+		status := ""
+		if len(args) > 0 {
+			status = args[0]
+		}
+		url := httpBase + "/v1/plugins/security"
+		if status != "" {
+			url += "?status=" + status
+		}
+		return doGet(ctx, url, cred)
+
+	case "security-approve":
+		if len(args) == 0 {
+			return errors.New("用法: security-approve <decision_id>")
+		}
+		id, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil {
+			return errors.New("decision_id 必须是整数")
+		}
+		body, _ := json.Marshal(map[string]int64{"decision_id": id})
+		return doPost(ctx, httpBase+"/v1/plugins/security/approve", cred, body)
+
+	case "security-revoke":
+		if len(args) == 0 {
+			return errors.New("用法: security-revoke <decision_id> [--reason \"...\"]")
+		}
+		id, err := strconv.ParseInt(args[0], 10, 64)
+		if err != nil {
+			return errors.New("decision_id 必须是整数")
+		}
+		reason := "security_bot revoked"
+		if len(args) > 1 {
+			reason = strings.Join(args[1:], " ")
+		}
+		body, _ := json.Marshal(map[string]any{"decision_id": id, "reason": reason})
+		return doPost(ctx, httpBase+"/v1/plugins/security/revoke", cred, body)
+
+	default:
+		return fmt.Errorf("未知 security 命令: %s", cmd)
+	}
+}
+
+// ---------------------- M2: DLQ 运营实现 ----------------------
+
+func handleDLQ(ctx context.Context, httpBase, cred string, args []string) error {
+	if len(args) == 0 {
+		return errors.New("缺少 dlq 子命令 (list, replay, archive)")
+	}
+	sub := args[0]
+	rest := args[1:]
+
+	switch sub {
+	case "list":
+		return doGet(ctx, httpBase+"/v1/dlq", cred)
+	case "replay":
+		fs := flag.NewFlagSet("dlq replay", flag.ExitOnError)
+		jobID := fs.Int64("job", 0, "任务 ID")
+		_ = fs.Parse(rest)
+		if *jobID == 0 {
+			return errors.New("dlq replay 需要 -job")
+		}
+		return doPost(ctx, fmt.Sprintf("%s/v1/jobs/%d/replay", httpBase, *jobID), cred, []byte("{}"))
+	case "archive":
+		fs := flag.NewFlagSet("dlq archive", flag.ExitOnError)
+		jobID := fs.Int64("job", 0, "任务 ID")
+		_ = fs.Parse(rest)
+		if *jobID == 0 {
+			return errors.New("dlq archive 需要 -job")
+		}
+		return doPost(ctx, fmt.Sprintf("%s/v1/dlq/%d/archive", httpBase, *jobID), cred, []byte("{}"))
+	default:
+		return fmt.Errorf("未知 dlq 子命令: %s", sub)
+	}
+}
+
+// ---------------------- HTTP 客户端辅助函数 ----------------------
 
 func readCredential(path string) (string, error) {
 	raw, err := os.ReadFile(path)
@@ -159,9 +780,18 @@ func readCredential(path string) (string, error) {
 }
 
 func doPost(ctx context.Context, url, cred string, body []byte) error {
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	respData, err := postAndReturn(ctx, url, cred, body)
 	if err != nil {
 		return err
+	}
+	fmt.Println(string(bytes.TrimSpace(respData)))
+	return nil
+}
+
+func postAndReturn(ctx context.Context, url, cred string, body []byte) ([]byte, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
 	if cred != "" {
@@ -169,36 +799,43 @@ func doPost(ctx context.Context, url, cred string, body []byte) error {
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, data)
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, data)
+	}
+	return data, nil
+}
+
+func doGet(ctx context.Context, url, cred string) error {
+	data, err := getAndReturn(ctx, url, cred)
+	if err != nil {
+		return err
 	}
 	fmt.Println(string(bytes.TrimSpace(data)))
 	return nil
 }
 
-func doGet(ctx context.Context, url, cred string) error {
+func getAndReturn(ctx context.Context, url, cred string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if cred != "" {
 		req.Header.Set("X-Nexus-Credential", cred)
 	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer resp.Body.Close()
 	data, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 300 {
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, data)
+		return nil, fmt.Errorf("HTTP %d: %s", resp.StatusCode, data)
 	}
-	fmt.Println(string(bytes.TrimSpace(data)))
-	return nil
+	return data, nil
 }
 
 func doSend(ctx context.Context, httpBase, cred, botID, text string, wait bool, timeout time.Duration, grpcAddr string) error {
@@ -210,10 +847,9 @@ func doSend(ctx context.Context, httpBase, cred, botID, text string, wait bool, 
 	body, err := json.Marshal(map[string]any{
 		"envelope":       env,
 		"payload_base64": base64.StdEncoding.EncodeToString(payload),
-		// 路由提示：通讯元数据，由入口适配器携带，不进信封
-		"bot_id":     botID,
-		"queue_name": botID,
-		"job_type":   "bot.request",
+		"bot_id":         botID,
+		"queue_name":     botID,
+		"job_type":       "bot.request",
 	})
 	if err != nil {
 		return err
@@ -243,8 +879,6 @@ func doSend(ctx context.Context, httpBase, cred, botID, text string, wait bool, 
 	return doSubscribe(waitCtx, grpcAddr, cred, "user_bot", env.EnvelopeID)
 }
 
-// doSubscribe 消费订阅组事件；wantCorrelation 非空时只认该因果链的 bot.reply，
-// 避免把历史遗留事件当成本次请求的回复。
 func doSubscribe(ctx context.Context, grpcAddr, cred, group, wantCorrelation string) error {
 	conn, err := grpc.NewClient(grpcAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
@@ -284,4 +918,10 @@ func doSubscribe(ctx context.Context, grpcAddr, cred, group, wantCorrelation str
 			return nil
 		}
 	}
+}
+
+// 辅助计算 sha256 checksum
+func sha256Hex(data []byte) string {
+	h := sha256.Sum256(data)
+	return hex.EncodeToString(h[:])
 }

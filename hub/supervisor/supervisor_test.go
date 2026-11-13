@@ -7,6 +7,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -79,14 +80,15 @@ func TestStartRejectsDigestMismatch(t *testing.T) {
 	}
 }
 
-// M1 只支持 lazy；resident 明确拒绝而非静默降级
-func TestStartRejectsNonLazy(t *testing.T) {
+// resident 模式由 supervisor 拉起并等待 Register
+func TestStartResidentAttemptsRegister(t *testing.T) {
 	sup, db := newSupervisor(t)
 	path, digest := writeArtifact(t, "#!/bin/sh\nexit 0\n")
 	db.Exec(t, `UPDATE bot_manifest SET binary_path=$1, binary_digest=$2, activation_mode='resident' WHERE bot_id='echo_bot'`, path, digest)
 
-	if err := sup.Start(context.Background(), "echo_bot"); !errors.Is(err, ErrNotLazy) {
-		t.Fatalf("resident 应被拒绝，实际 %v", err)
+	err := sup.Start(context.Background(), "echo_bot")
+	if err == nil || !strings.Contains(err.Error(), "在 Register 前退出") {
+		t.Fatalf("resident 脚本退出前未 register 应报错，实际 %v", err)
 	}
 }
 

@@ -143,7 +143,7 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 | --- | --- |
 | M0 工程骨架 | 已完成（`c657459`）；D-22 记忆插件化（`65f3901`）与 D-23 文档重构（PG + 配置中心）已落地 |
 | M1 内核 MVP（纯内核） | 已完成（详设第 8 节六条验收全过；实现偏离与验收证据见详设 §10） |
-| M2 Bot 管理与插件运营 | 未开始（含 PostgreSQL docker-compose、插件生命周期、配置完整审批流） |
+| M2 Bot 管理与插件运营 | 已完成（PostgreSQL 16+ docker-compose、配置中心完整审批流、Bot 管理、两级进程生命周期、DLQ 与 Health 全部验收通过，详见 `scripts/smoke-m2.sh`） |
 | M3+ | 未开始（记忆插件 v1 在 M3；MCP / Skill 不在任何里程碑内） |
 
 ## 常见禁忌（先问用户再做）

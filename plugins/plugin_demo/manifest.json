@@ -1,0 +1,29 @@
+{
+  "plugin_id": "plugin_demo",
+  "name": "Demo Plugin",
+  "version": "1.0.0",
+  "plugin_type": "workspace",
+  "description": "M2 \u5192\u70df\u4e0e\u751f\u547d\u5468\u671f\u9a8c\u8bc1\u63d2\u4ef6",
+  "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_demo",
+  "publishing": [
+    "plugin_demo.demo.event"
+  ],
+  "subscribing": [
+    "bot.reply"
+  ],
+  "requiring_tools": [],
+  "bot_templates": [
+    {
+      "bot_id": "demo_bot",
+      "role": "plugin",
+      "display_name": "Demo Bot",
+      "activation_mode": "resident",
+      "capabilities": [
+        "echo",
+        "demo"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "binary_digest": "3b15c404f85e29e95b576c9fa329cd020ec4403a70b30a8fc281b29359bd084a"
+}

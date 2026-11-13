@@ -8,6 +8,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/888xiyan/NexusCore/hub/registry"
 	"github.com/888xiyan/NexusCore/hub/scheduler"
 	"github.com/888xiyan/NexusCore/hub/store"
+	"github.com/888xiyan/NexusCore/internal/osproc"
 	"github.com/jackc/pgx/v5"
 )
 
@@ -36,7 +38,7 @@ const (
 var (
 	ErrDigestMismatch = errors.New("制品 binary_digest 与 manifest 不一致")
 	ErrCircuitBroken  = errors.New("连续启动失败已熔断")
-	ErrNotLazy        = errors.New("M1 只支持 activation_mode=lazy")
+	ErrNotLazy        = errors.New("不支持的 activation_mode（仅支持 lazy 或 resident）")
 )
 
 type process struct {
@@ -58,6 +60,7 @@ type Supervisor struct {
 	cfg   *config.Module
 
 	grpcAddr      string
+	httpAddr      string
 	transportAddr string
 	reconcile     time.Duration
 	startTimeout  time.Duration
@@ -74,6 +77,7 @@ type Supervisor struct {
 
 type Options struct {
 	GRPCAddr          string
+	HTTPAddr          string
 	TransportAddr     string
 	ReconcileInterval time.Duration
 	StartTimeout      time.Duration
@@ -90,9 +94,13 @@ func New(st *store.Store, reg *registry.Registry, sched *scheduler.Scheduler, cf
 	if opt.MaxStartFailures <= 0 {
 		opt.MaxStartFailures = DefaultMaxStartFailures
 	}
+	httpAddr := opt.HTTPAddr
+	if httpAddr == "" {
+		httpAddr = "127.0.0.1:7100"
+	}
 	return &Supervisor{
 		st: st, reg: reg, sched: sched, cfg: cfg,
-		grpcAddr: opt.GRPCAddr, transportAddr: opt.TransportAddr,
+		grpcAddr: opt.GRPCAddr, httpAddr: httpAddr, transportAddr: opt.TransportAddr,
 		reconcile: opt.ReconcileInterval, startTimeout: opt.StartTimeout, maxFailures: opt.MaxStartFailures,
 		procs: map[string]*process{}, failures: map[string]int{}, backoff: map[string]time.Time{},
 	}
@@ -106,17 +114,21 @@ type manifest struct {
 	idleTTL        int
 	startTimeout   int
 	configVersion  int64
+	pluginID       string
+	pluginBinary   string
+	pluginDigest   string
 }
 
 func (s *Supervisor) loadManifest(ctx context.Context, botID string) (*manifest, error) {
 	var m manifest
 	var cv *int64
+	var parentPlugin *string
 	err := s.st.Pool().QueryRow(ctx, `
 		SELECT m.bot_id, m.binary_path, m.binary_digest, m.activation_mode,
-		       m.idle_ttl_seconds, m.start_timeout_seconds, m.config_version
+		       m.idle_ttl_seconds, m.start_timeout_seconds, m.config_version, m.parent_plugin
 		  FROM bot_manifest m JOIN bots b ON b.bot_id = m.bot_id
 		 WHERE m.bot_id=$1 AND b.enabled = true AND b.desired_state='start'`, botID).
-		Scan(&m.botID, &m.binaryPath, &m.binaryDigest, &m.activationMode, &m.idleTTL, &m.startTimeout, &cv)
+		Scan(&m.botID, &m.binaryPath, &m.binaryDigest, &m.activationMode, &m.idleTTL, &m.startTimeout, &cv, &parentPlugin)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("bot %q 未注册或未处于 desired_state=start", botID)
 	}
@@ -126,6 +138,28 @@ func (s *Supervisor) loadManifest(ctx context.Context, botID string) (*manifest,
 	if cv != nil {
 		m.configVersion = *cv
 	}
+
+	if parentPlugin != nil && *parentPlugin != "" {
+		var rawMf []byte
+		if err := s.st.Pool().QueryRow(ctx, `SELECT manifest_json FROM kernel_plugins WHERE plugin_id=$1`, *parentPlugin).Scan(&rawMf); err == nil {
+			var pMf struct {
+				Binary       string `json:"binary"`
+				BinaryDigest string `json:"binary_digest"`
+				BotTemplates []struct {
+					BotID string `json:"bot_id"`
+				} `json:"bot_templates"`
+			}
+			if err := json.Unmarshal(rawMf, &pMf); err == nil && len(pMf.BotTemplates) > 0 {
+				// bot_templates[0] 即 owner bot
+				if pMf.BotTemplates[0].BotID == botID && pMf.Binary != "" {
+					m.pluginID = *parentPlugin
+					m.pluginBinary = pMf.Binary
+					m.pluginDigest = pMf.BinaryDigest
+				}
+			}
+		}
+	}
+
 	return &m, nil
 }
 
@@ -164,7 +198,7 @@ func (s *Supervisor) Start(ctx context.Context, botID string) error {
 	if err != nil {
 		return err
 	}
-	if m.activationMode != "lazy" {
+	if m.activationMode != "lazy" && m.activationMode != "resident" {
 		return fmt.Errorf("%w: %s", ErrNotLazy, m.activationMode)
 	}
 	if err := verifyDigest(m.binaryPath, m.binaryDigest); err != nil {
@@ -176,13 +210,28 @@ func (s *Supervisor) Start(ctx context.Context, botID string) error {
 		return fmt.Errorf("签发 bot 凭证: %w", err)
 	}
 
-	cmd := exec.Command(m.binaryPath,
+	idleTTL := m.idleTTL
+	if m.activationMode == "resident" {
+		idleTTL = 0
+	}
+
+	args := []string{
 		"-bot-id", botID,
 		"-hub-grpc", s.grpcAddr,
+		"-hub-http", s.httpAddr,
 		"-hub-transport", s.transportAddr,
-		"-idle-ttl", fmt.Sprintf("%d", m.idleTTL),
+		"-idle-ttl", fmt.Sprintf("%d", idleTTL),
 		"-config-version", fmt.Sprintf("%d", m.configVersion),
-	)
+	}
+	if m.pluginID != "" && m.pluginBinary != "" {
+		args = append(args,
+			"-plugin-id", m.pluginID,
+			"-plugin-binary", m.pluginBinary,
+			"-plugin-digest", m.pluginDigest,
+		)
+	}
+
+	cmd := exec.Command(m.binaryPath, args...)
 	cmd.Env = append(os.Environ(), BotCredentialEnv+"="+cred.Token)
 	// 独立进程组，便于回收整棵子树
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -302,10 +351,137 @@ func (s *Supervisor) watch(botID string, p *process) {
 		UPDATE bot_instances SET observed_state=$2, stopped_at=now(), last_error=$3 WHERE instance_id=$1`,
 		p.instanceID, state, errString(err))
 	_ = s.setObserved(ctx, botID, "dormant")
+
+	// 级联回收孤儿插件进程（PluginMvp §6.6）
+	s.cascadeKillPluginProcess(ctx, botID)
+
 	if err != nil {
 		s.recordFailure(botID, "crashed")
 		s.report("supervisor", "bot", botID, "bot_crash", "warning", err.Error())
 	}
+}
+
+// cascadeKillPluginProcess 级联回收 owner bot 名下的孤儿插件进程（含孙进程）。
+func (s *Supervisor) cascadeKillPluginProcess(ctx context.Context, ownerBotID string) {
+	rows, err := s.st.Pool().Query(ctx, `
+		SELECT plugin_id, pid, pgid, pid_start_time
+		  FROM kernel_plugin_processes
+		 WHERE owner_bot_id=$1 AND state IN ('pending','starting','running','stopping')`, ownerBotID)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	type procTarget struct {
+		pluginID  string
+		pid       int
+		pgid      int
+		startTime int64
+	}
+	var targets []procTarget
+	for rows.Next() {
+		var t procTarget
+		if err := rows.Scan(&t.pluginID, &t.pid, &t.pgid, &t.startTime); err == nil {
+			targets = append(targets, t)
+		}
+	}
+	rows.Close()
+
+	for _, t := range targets {
+		if osproc.IsProcessAlive(t.pid, t.startTime) {
+			_ = osproc.KillProcessGroup(t.pgid, syscall.SIGKILL)
+		}
+		_, _ = s.st.Pool().Exec(ctx, `
+			UPDATE kernel_plugin_processes
+			   SET state='killed', stop_mode='force', stopped_at=now(), last_error='orphan_cascade_killed'
+			 WHERE plugin_id=$1`, t.pluginID)
+		s.report("supervisor", "plugin_process", t.pluginID, "orphan_cascade_killed", "warning",
+			fmt.Sprintf("owner bot %s 下线，级联回收插件进程 (PID %d)", ownerBotID, t.pid))
+	}
+}
+
+// StartupCleanup 在 hub 启动时扫描并清理上一轮残留的运行中插件进程。
+func (s *Supervisor) StartupCleanup(ctx context.Context) error {
+	rows, err := s.st.Pool().Query(ctx, `
+		SELECT plugin_id, pid, pgid, pid_start_time
+		  FROM kernel_plugin_processes
+		 WHERE state IN ('starting','running','stopping')`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type procTarget struct {
+		pluginID  string
+		pid       int
+		pgid      int
+		startTime int64
+	}
+	var targets []procTarget
+	for rows.Next() {
+		var t procTarget
+		if err := rows.Scan(&t.pluginID, &t.pid, &t.pgid, &t.startTime); err == nil {
+			targets = append(targets, t)
+		}
+	}
+	rows.Close()
+
+	for _, t := range targets {
+		if osproc.IsProcessAlive(t.pid, t.startTime) {
+			_ = osproc.KillProcessGroup(t.pgid, syscall.SIGKILL)
+		}
+		_, _ = s.st.Pool().Exec(ctx, `
+			UPDATE kernel_plugin_processes
+			   SET state='killed', stop_mode='force', stopped_at=now(), last_error='hub_restart_cascade_cleanup'
+			 WHERE plugin_id=$1`, t.pluginID)
+	}
+	return nil
+}
+
+// KillPluginProcess 强制终止插件进程（PluginMvp §6.5：user_bot -> create_bot -> supervisor 执行）。
+func (s *Supervisor) KillPluginProcess(ctx context.Context, pluginID, reason, actorID string) error {
+	var pid, pgid int
+	var startTime int64
+	var state string
+	err := s.st.Pool().QueryRow(ctx, `
+		SELECT pid, pgid, pid_start_time, state
+		  FROM kernel_plugin_processes WHERE plugin_id=$1`, pluginID).Scan(&pid, &pgid, &startTime, &state)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return fmt.Errorf("插件进程 %s 不存在", pluginID)
+		}
+		return fmt.Errorf("查询插件进程: %w", err)
+	}
+	if state == "stopped" || state == "killed" || state == "failed" {
+		return nil // 幂等返回
+	}
+
+	// 保留 PID 黑名单校验（防误杀系统/hub 自身进程）
+	selfPID := os.Getpid()
+	selfPPID := os.Getppid()
+	if pid <= 1 || pid == selfPID || pid == selfPPID || pgid <= 1 || pgid == selfPID || pgid == selfPPID {
+		return fmt.Errorf("目标 PID %d/PGID %d 命中保留黑名单，拒绝执行", pid, pgid)
+	}
+
+	// 存活与 starttime 双校验
+	if osproc.IsProcessAlive(pid, startTime) {
+		if err := osproc.KillProcessGroup(pgid, syscall.SIGKILL); err != nil {
+			return fmt.Errorf("向进程组 %d 发送 SIGKILL: %w", pgid, err)
+		}
+	}
+
+	// 审计双写：kernel_security_decisions
+	_, _ = s.st.Pool().Exec(ctx, `
+		INSERT INTO kernel_security_decisions
+		  (subject_type, subject_id, action, decision, requested_by, decided_by, reason)
+		VALUES
+		  ('plugin_process', $1, 'force_kill', 'approved', $2, 'security_bot', $3)`,
+		pluginID, actorID, reason)
+
+	// 更新登记表
+	_, err = s.st.Pool().Exec(ctx, `
+		UPDATE kernel_plugin_processes
+		   SET state='killed', stop_mode='force', stopped_at=now(), last_error=$2
+		 WHERE plugin_id=$1`, pluginID, reason)
+	return err
 }
 
 func errString(err error) string {
@@ -364,16 +540,21 @@ func (s *Supervisor) report(sourceType, targetType, targetID, failureClass, seve
 	}
 }
 
-// Reconcile 一轮调和：为有待处理任务的 lazy Bot 拉起进程。只读 desired，不改 desired。
+// Reconcile 一轮调和：为有待处理任务的 lazy Bot 及常驻 resident Bot 拉起进程。只读 desired，不改 desired。
 func (s *Supervisor) Reconcile(ctx context.Context) (started int, errs []error) {
 	rows, err := s.st.Pool().Query(ctx, `
 		SELECT b.bot_id
 		  FROM bots b
 		  JOIN bot_manifest m ON m.bot_id = b.bot_id
-		 WHERE b.enabled = true AND b.desired_state='start' AND m.activation_mode='lazy'
-		   AND EXISTS (SELECT 1 FROM kernel_jobs j
-		                WHERE j.queue_name = b.bot_id AND j.status IN ('queued','retry_backoff')
-		                  AND (j.next_retry_at IS NULL OR j.next_retry_at <= now()))
+		 WHERE b.enabled = true AND b.desired_state='start'
+		   AND (
+		     (m.activation_mode='lazy' AND EXISTS (
+		       SELECT 1 FROM kernel_jobs j
+		        WHERE j.queue_name = b.bot_id AND j.status IN ('queued','retry_backoff')
+		          AND (j.next_retry_at IS NULL OR j.next_retry_at <= now())
+		     ))
+		     OR (m.activation_mode='resident' OR b.min_instances > 0)
+		   )
 		 ORDER BY b.bot_id`)
 	if err != nil {
 		return 0, []error{fmt.Errorf("扫描待启动 Bot: %w", err)}
@@ -410,6 +591,11 @@ func (s *Supervisor) Reconcile(ctx context.Context) (started int, errs []error) 
 
 // Run 是 reconcile 主循环，阻塞直到 ctx 结束。
 func (s *Supervisor) Run(ctx context.Context) error {
+	// 启动时清理上一轮异常残留的插件进程（PluginMvp §6.6）
+	_ = s.StartupCleanup(ctx)
+	// 启动初始调和（拉起预置的 resident bots）
+	_, _ = s.Reconcile(ctx)
+
 	ticker := time.NewTicker(s.reconcile)
 	defer ticker.Stop()
 	for {
