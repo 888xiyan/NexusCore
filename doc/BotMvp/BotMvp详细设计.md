@@ -444,3 +444,23 @@ hub 重启
 | 8.5 | 6.9 |
 | 4.1 / 4.2 / 8.6 / 8.7 | PluginMvp §6.4 / §6.5（插件进程关闭双路径） |
 | 4.3 / 6.5 / 8.5 | 6.9 + PluginMvp §6.3（PID 登记与巡检） |
+
+## 11. 修订记录
+
+### 11.1 M2 实现落地与工程细化（2026-11-13）
+
+Bot MVP 与两级进程管理已在 M2 交付落地并通过全套自动化验证。结合工程落地与代码审查，以下设计细节与偏离做正式归档：
+
+1. **两级进程管理自治与独立同步锁（pluginMu）**：
+   - 在 `bot-runtime` 中将插件子进程（L2）的生命周期与终态控制从任务租约锁中剥离，使用独立的 `pluginProcess` 实例与 `pluginMu` 互斥锁保护。
+   - 启动、优雅停止、终态上报严格串行化，未向 hub 完成终态上报前禁止开启新代，杜绝代际竞争。
+2. **“先子后父”退出协议落地（PluginMvp §6.4）**：
+   - owner bot 退出前必须先调用 `stopPluginProcess` 执行优雅关闭（SIGTERM + 轮询检测 + 超时升级 SIGKILL + waitpid 回收进程组），成功完成终态报告后再执行 gRPC Deregister 并安全退出自身。
+3. **运行时制品可信接入（RuntimeArtifact）**：
+   - 插件 Bot 模板激活时，禁止从不可信路径或未校验的上下文获取运行时制品；统一调用 supervisor 的 `RuntimeArtifact()`，提供经过 SHA-256 校验的可靠二进制路径与摘要。
+4. **监控巡检主动开启因果链（硬约束 12 落实）**：
+   - `monitor_bot` 周期巡检发现心跳失联、进程消失或配置漂移时，作为观测发起者主动开启根因果链（`envelope.NewRoot("monitor_bot", envelope.ChannelHealth, envelope.MsgEvent, "")`），禁止补造调用方历史；
+   - 巡检完整信封与结构化证据一并存入 `kernel_health_reports.evidence_json`，并显式持久化 `correlation_id` / `causation_id` / `idempotency_key`。
+5. **M2 验收结果**：
+   - 验收项（冷启动 3 个 resident Bot ready、`create-bot pull`、插件 Bot 注册、两级进程优雅与强制关闭、孤儿级联清理、配置漂移告警）全量通过。
+

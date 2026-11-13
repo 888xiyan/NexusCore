@@ -4,8 +4,10 @@
 package main
 
 import (
+	"bufio"
 	"bytes"
 	"context"
+	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
@@ -22,12 +24,14 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/888xiyan/NexusCore/internal/envelope"
-	"github.com/888xiyan/NexusCore/internal/version"
-	pb "github.com/888xiyan/NexusCore/proto/gen/v1"
+	"golang.org/x/sys/unix"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
+
+	"github.com/888xiyan/NexusCore/internal/envelope"
+	"github.com/888xiyan/NexusCore/internal/version"
+	pb "github.com/888xiyan/NexusCore/proto/gen/v1"
 )
 
 const defaultHTTP = "http://127.0.0.1:7100"
@@ -287,7 +291,34 @@ func usage() {
 
 // ---------------------- M2: 配置中心实现 ----------------------
 
+// configInteraction 将终端检测与输入输出绑定；测试可注入交互，不提供命令行绕过开关。
+type configInteraction struct {
+	input      io.Reader
+	output     io.Writer
+	isTerminal func() bool
+}
+
+func isTerminal(file *os.File) bool {
+	// /dev/null 也是字符设备，不能仅依赖 ModeCharDevice 判断。
+	_, err := unix.IoctlGetTermios(int(file.Fd()), unix.TCGETS)
+	return err == nil
+}
+
+func (ui configInteraction) requireTerminal() error {
+	if ui.isTerminal == nil || !ui.isTerminal() {
+		return errors.New("配置批准必须在真实交互终端进行，禁止 stdin 重定向或 --yes 跳过确认")
+	}
+	return nil
+}
+
 func handleConfig(ctx context.Context, httpBase, cred string, args []string) error {
+	return handleConfigInteractive(ctx, httpBase, cred, args, configInteraction{
+		input: os.Stdin, output: os.Stderr,
+		isTerminal: func() bool { return isTerminal(os.Stdin) },
+	})
+}
+
+func handleConfigInteractive(ctx context.Context, httpBase, cred string, args []string, ui configInteraction) error {
 	if len(args) == 0 {
 		return errors.New("缺少 config 子命令 (list, get, history, propose, diff, review, approve, reject, activate, rollback, pending, secret, set)")
 	}
@@ -374,8 +405,8 @@ func handleConfig(ctx context.Context, httpBase, cred string, args []string) err
 		_ = fs.Parse(rest[1:])
 		body, _ := json.Marshal(map[string]string{
 			"proposal_id": propID,
-			"decision":   *dec,
-			"reason":     *reason,
+			"decision":    *dec,
+			"reason":      *reason,
 		})
 		return doPost(ctx, httpBase+"/v1/config/review", cred, body)
 
@@ -384,17 +415,18 @@ func handleConfig(ctx context.Context, httpBase, cred string, args []string) err
 			return errors.New("用法: config approve <proposal_id> --checksum <sha256>")
 		}
 		propID := rest[0]
-		fs := flag.NewFlagSet("config approve", flag.ExitOnError)
+		fs := flag.NewFlagSet("config approve", flag.ContinueOnError)
 		csum := fs.String("checksum", "", "待批准配置的 sha256 checksum")
-		_ = fs.Parse(rest[1:])
+		if err := fs.Parse(rest[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("config approve 不接受额外参数或 --yes 跳过确认")
+		}
 		if *csum == "" {
 			return errors.New("config approve 必须提供 --checksum 校验和")
 		}
-		body, _ := json.Marshal(map[string]string{
-			"proposal_id": propID,
-			"checksum":    *csum,
-		})
-		return doPost(ctx, httpBase+"/v1/config/approve", cred, body)
+		return approveConfigInteractive(ctx, httpBase, cred, propID, *csum, ui)
 
 	case "reject":
 		if len(rest) == 0 {
@@ -472,28 +504,40 @@ func handleConfig(ctx context.Context, httpBase, cred string, args []string) err
 
 	case "set":
 		// set 是交互式便利命令：propose -> diff -> approve -> activate
-		fs := flag.NewFlagSet("config set", flag.ExitOnError)
+		// 必须在读取文件和任何 HTTP 请求之前拒绝非终端输入，避免创建无人审批的提案。
+		if err := ui.requireTerminal(); err != nil {
+			return err
+		}
+		fs := flag.NewFlagSet("config set", flag.ContinueOnError)
 		file := fs.String("file", "", "spec JSON 文件路径")
 		scope := fs.String("scope", "", "范围类型")
 		id := fs.String("id", "", "主体 ID")
 		key := fs.String("key", "default", "配置键")
 		baseVer := fs.Int64("base-version", 0, "基准版本号")
-		_ = fs.Parse(rest)
+		if err := fs.Parse(rest); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("config set 不接受额外参数或 --yes 跳过确认")
+		}
 		if *file == "" || *scope == "" || *id == "" {
 			return errors.New("config set 需要 --file, --scope, --id")
 		}
 		data, err := os.ReadFile(*file)
 		if err != nil {
-			return err
+			return fmt.Errorf("读取配置文件: %w", err)
 		}
 		// 1. Propose
-		pBody, _ := json.Marshal(map[string]any{
+		pBody, err := json.Marshal(map[string]any{
 			"scope_type":   *scope,
 			"scope_id":     *id,
 			"config_key":   *key,
 			"spec":         json.RawMessage(data),
 			"base_version": *baseVer,
 		})
+		if err != nil {
+			return fmt.Errorf("编码配置提案: %w", err)
+		}
 		pResp, err := postAndReturn(ctx, httpBase+"/v1/config/propose", cred, pBody)
 		if err != nil {
 			return fmt.Errorf("提案失败: %w", err)
@@ -501,30 +545,16 @@ func handleConfig(ctx context.Context, httpBase, cred string, args []string) err
 		var pResult struct {
 			ProposalID string `json:"proposal_id"`
 		}
-		_ = json.Unmarshal(pResp, &pResult)
+		if err := json.Unmarshal(pResp, &pResult); err != nil {
+			return fmt.Errorf("解析提案响应: %w", err)
+		}
 		if pResult.ProposalID == "" {
 			return fmt.Errorf("提案未返回 proposal_id: %s", string(pResp))
 		}
-		fmt.Fprintf(os.Stderr, "提案已创建: %s\n", pResult.ProposalID)
 
-		// 2. Diff & Checksum
-		dResp, err := getAndReturn(ctx, httpBase+"/v1/config/diff/"+pResult.ProposalID, cred)
-		if err != nil {
-			return fmt.Errorf("获取 diff 失败: %w", err)
-		}
-		var dResult struct {
-			Checksum string `json:"checksum"`
-		}
-		_ = json.Unmarshal(dResp, &dResult)
-		fmt.Fprintf(os.Stderr, "提案 checksum: %s\n", dResult.Checksum)
-
-		// 3. Approve
-		aBody, _ := json.Marshal(map[string]string{
-			"proposal_id": pResult.ProposalID,
-			"checksum":    dResult.Checksum,
-		})
-		if err := doPost(ctx, httpBase+"/v1/config/approve", cred, aBody); err != nil {
-			return fmt.Errorf("批准失败: %w", err)
+		// 2-3. 展示服务端 diff，交互确认后使用同一 checksum 批准。
+		if err := approveConfigInteractive(ctx, httpBase, cred, pResult.ProposalID, "", ui); err != nil {
+			return err
 		}
 
 		// 4. Activate
@@ -538,6 +568,61 @@ func handleConfig(ctx context.Context, httpBase, cred string, args []string) err
 	default:
 		return fmt.Errorf("未知 config 子命令: %s", sub)
 	}
+}
+
+// approveConfigInteractive 仅在展示并确认同一份服务端 diff 后批准。
+// expectedChecksum 为空仅用于 set；独立 approve 命令必须由调用方提供校验和。
+func approveConfigInteractive(ctx context.Context, httpBase, cred, proposalID, expectedChecksum string, ui configInteraction) error {
+	if err := ui.requireTerminal(); err != nil {
+		return err
+	}
+	data, err := getAndReturn(ctx, httpBase+"/v1/config/diff/"+proposalID, cred)
+	if err != nil {
+		return fmt.Errorf("获取 diff 失败: %w", err)
+	}
+	var diff struct {
+		Base     json.RawMessage `json:"base"`
+		Proposal json.RawMessage `json:"proposal"`
+		Diff     json.RawMessage `json:"diff,omitempty"`
+		Checksum string          `json:"checksum"`
+	}
+	if err := json.Unmarshal(data, &diff); err != nil {
+		return fmt.Errorf("解析 diff 响应: %w", err)
+	}
+	checksum, err := hex.DecodeString(diff.Checksum)
+	if err != nil || len(checksum) != sha256.Size {
+		return errors.New("diff 响应缺少有效的 sha256 checksum，拒绝批准")
+	}
+	if expectedChecksum != "" && expectedChecksum != diff.Checksum {
+		return errors.New("提供的 checksum 与服务端 diff 不一致，拒绝批准")
+	}
+	if len(diff.Proposal) == 0 || bytes.Equal(bytes.TrimSpace(diff.Proposal), []byte("null")) {
+		return errors.New("diff 响应缺少 proposal，拒绝批准")
+	}
+	// 服务端以 base / proposal 提供对照；首次提案的 base 明确显示为 null。
+	pretty, err := json.MarshalIndent(diff, "", "  ")
+	if err != nil {
+		return fmt.Errorf("格式化 diff: %w", err)
+	}
+	if _, err := fmt.Fprintf(ui.output, "提案: %s\nchecksum（前 12 位）: %.12s\nDiff（base → proposal）:\n%s\n输入 yes 并回车以批准，其他输入取消: ", proposalID, diff.Checksum, pretty); err != nil {
+		return fmt.Errorf("显示批准确认: %w", err)
+	}
+	answer, err := bufio.NewReader(ui.input).ReadString('\n')
+	if err != nil {
+		// 即使 EOF 前有 yes，也不视为完成了确认。
+		return fmt.Errorf("读取批准确认失败，未批准: %w", err)
+	}
+	if strings.TrimSpace(answer) != "yes" {
+		return errors.New("用户取消，未批准配置")
+	}
+	body, _ := json.Marshal(map[string]string{
+		"proposal_id": proposalID,
+		"checksum":    diff.Checksum,
+	})
+	if err := doPost(ctx, httpBase+"/v1/config/approve", cred, body); err != nil {
+		return fmt.Errorf("批准失败: %w", err)
+	}
+	return nil
 }
 
 // ---------------------- M2: Bot 管理实现 ----------------------
@@ -643,7 +728,7 @@ func handlePlugin(ctx context.Context, httpBase, cred string, args []string) err
 		if len(rest) == 0 {
 			return errors.New("用法: plugin disable <plugin_id>")
 		}
-		return doPost(ctx, httpBase+"/v1/plugins/"+rest[0]+"/disable", cred, []byte("{}"))
+		return postPluginControl(ctx, httpBase+"/v1/plugins/"+rest[0]+"/disable", cred, nil)
 
 	case "uninstall":
 		if len(rest) == 0 {
@@ -654,8 +739,9 @@ func handlePlugin(ctx context.Context, httpBase, cred string, args []string) err
 		confirm := fs.Bool("confirm", false, "清理元数据与表")
 		keep := fs.Bool("keep", false, "保留类型化表")
 		_ = fs.Parse(rest[1:])
-		body, _ := json.Marshal(map[string]bool{"confirm": *confirm, "keep": *keep})
-		return doPost(ctx, httpBase+"/v1/plugins/"+pluginID+"/uninstall", cred, body)
+		return postPluginControl(ctx, httpBase+"/v1/plugins/"+pluginID+"/uninstall", cred, map[string]any{
+			"confirm": *confirm, "keep": *keep,
+		})
 
 	case "ps":
 		return doGet(ctx, httpBase+"/v1/plugins/processes", cred)
@@ -664,13 +750,13 @@ func handlePlugin(ctx context.Context, httpBase, cred string, args []string) err
 		if len(rest) == 0 {
 			return errors.New("用法: plugin stop <plugin_id>")
 		}
-		return doPost(ctx, httpBase+"/v1/plugins/"+rest[0]+"/process/stop", cred, []byte("{}"))
+		return postPluginControl(ctx, httpBase+"/v1/plugins/"+rest[0]+"/process/stop", cred, nil)
 
 	case "start":
 		if len(rest) == 0 {
 			return errors.New("用法: plugin start <plugin_id>")
 		}
-		return doPost(ctx, httpBase+"/v1/plugins/"+rest[0]+"/process/start", cred, []byte("{}"))
+		return postPluginControl(ctx, httpBase+"/v1/plugins/"+rest[0]+"/process/start", cred, nil)
 
 	case "kill":
 		if len(rest) == 0 {
@@ -684,12 +770,30 @@ func handlePlugin(ctx context.Context, httpBase, cred string, args []string) err
 		if !*confirm {
 			return errors.New("plugin kill 必须提供 --confirm 二次确认 (PluginMvp §6.5 规则 2)")
 		}
-		body, _ := json.Marshal(map[string]any{"confirm": *confirm, "reason": *reason})
-		return doPost(ctx, httpBase+"/v1/plugins/"+pluginID+"/process/kill", cred, body)
+		return postPluginControl(ctx, httpBase+"/v1/plugins/"+pluginID+"/process/kill", cred, map[string]any{
+			"confirm": *confirm, "reason": *reason,
+		})
 
 	default:
 		return fmt.Errorf("未知 plugin 子命令: %s", sub)
 	}
+}
+
+// postPluginControl 在客户端生成完整因果链，仅用于插件生命周期控制，不改变清单契约。
+func postPluginControl(ctx context.Context, url, cred string, fields map[string]any) error {
+	key := make([]byte, 16)
+	if _, err := rand.Read(key); err != nil {
+		return fmt.Errorf("生成插件控制幂等键: %w", err)
+	}
+	if fields == nil {
+		fields = make(map[string]any)
+	}
+	fields["envelope"] = envelope.NewRoot("user_bot", envelope.ChannelCLI, envelope.MsgControl, "cli_plugin_"+hex.EncodeToString(key))
+	body, err := json.Marshal(fields)
+	if err != nil {
+		return fmt.Errorf("编码插件控制请求: %w", err)
+	}
+	return doPost(ctx, url, cred, body)
 }
 
 func handleSecurity(ctx context.Context, httpBase, cred, cmd string, args []string) error {

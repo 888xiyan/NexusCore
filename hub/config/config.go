@@ -146,59 +146,81 @@ func RequiresSecurityReview(scopeType string, spec any) bool {
 
 // Propose 提交提案：提案不生效、不进入运行投影（ConfigCenter §4.1）。
 func (m *Module) Propose(ctx context.Context, actor Actor, scopeType, scopeID, configKey string, specRaw json.RawMessage, baseVersion int64) (string, error) {
+	doc, err := prepareProposal(actor, scopeType, scopeID, configKey, specRaw, baseVersion)
+	if err != nil {
+		return "", err
+	}
+	var docID string
+	err = m.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		var err error
+		docID, err = proposeTx(ctx, tx, doc)
+		return err
+	})
+	if err != nil {
+		return "", err
+	}
+	return docID, nil
+}
+
+// prepareProposal 与 proposeTx 共同实现提案校验与写入，供独立调用和安装事务复用。
+func prepareProposal(actor Actor, scopeType, scopeID, configKey string, specRaw json.RawMessage, baseVersion int64) (*Document, error) {
 	if configKey == "" {
 		configKey = DefaultConfigKey
 	}
 	if err := validScope(scopeType, scopeID); err != nil {
-		return "", err
+		return nil, err
 	}
 	spec, err := DecodeSpec(specRaw)
 	if err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidSpec, err)
+		return nil, fmt.Errorf("%w: %v", ErrInvalidSpec, err)
 	}
 	if err := ScanSecrets(spec); err != nil {
-		return "", fmt.Errorf("%w: %v", ErrInvalidSpec, err)
+		return nil, fmt.Errorf("%w: %v", ErrInvalidSpec, err)
 	}
 	checksum, err := Checksum(spec)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	canonical, err := CanonicalJSON(spec)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	review := RequiresSecurityReview(scopeType, spec)
 	status := StatusProposed
-	if review {
+	if RequiresSecurityReview(scopeType, spec) {
 		status = StatusSecurityReview
 	}
+	return &Document{
+		ScopeType: scopeType, ScopeID: scopeID, ConfigKey: configKey,
+		Status: status, Spec: canonical, SchemaVersion: 1, Checksum: checksum,
+		BaseVersion: &baseVersion, CreatedBy: actor.ID,
+	}, nil
+}
 
-	var docID string
-	err = m.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		activeVersion, err := activeVersionOf(ctx, tx, scopeType, scopeID, configKey)
-		if err != nil {
-			return err
-		}
-		if baseVersion != activeVersion {
-			return fmt.Errorf("%w: base_version=%d 与当前 active 版本 %d 不一致，请重新提案", ErrConflict, baseVersion, activeVersion)
-		}
-		nextVersion, err := nextVersionOf(ctx, tx, scopeType, scopeID, configKey)
-		if err != nil {
-			return err
-		}
-		if err := tx.QueryRow(ctx, `
-			INSERT INTO kernel_config_documents
-			  (scope_type, scope_id, config_key, version, status, spec, schema_version,
-			   checksum, base_version, created_by)
-			VALUES ($1,$2,$3,$4,$5,$6::jsonb,1,$7,$8,$9)
-			RETURNING doc_id`,
-			scopeType, scopeID, configKey, nextVersion, status, string(canonical),
-			checksum, baseVersion, actor.ID).Scan(&docID); err != nil {
-			return fmt.Errorf("写入配置提案: %w", err)
-		}
-		return writeAudit(ctx, tx, docID, "propose", actor.ID, "", status, checksum, "")
-	})
+func proposeTx(ctx context.Context, tx pgx.Tx, doc *Document) (string, error) {
+	activeVersion, err := activeVersionOf(ctx, tx, doc.ScopeType, doc.ScopeID, doc.ConfigKey)
 	if err != nil {
+		return "", err
+	}
+	baseVersion := *doc.BaseVersion // 只接收 prepareProposal 的结果。
+	if baseVersion != activeVersion {
+		return "", fmt.Errorf("%w: base_version=%d 与当前 active 版本 %d 不一致，请重新提案", ErrConflict, baseVersion, activeVersion)
+	}
+	nextVersion, err := nextVersionOf(ctx, tx, doc.ScopeType, doc.ScopeID, doc.ConfigKey)
+	if err != nil {
+		return "", err
+	}
+	var docID string
+	if err := tx.QueryRow(ctx, `
+		INSERT INTO kernel_config_documents
+		  (scope_type, scope_id, config_key, version, status, spec, schema_version,
+		   checksum, base_version, created_by)
+		VALUES ($1,$2,$3,$4,$5,$6::jsonb,1,$7,$8,$9)
+		RETURNING doc_id`,
+		doc.ScopeType, doc.ScopeID, doc.ConfigKey, nextVersion, doc.Status, string(doc.Spec),
+		doc.Checksum, baseVersion, doc.CreatedBy).Scan(&docID); err != nil {
+		return "", fmt.Errorf("写入配置提案: %w", err)
+	}
+	if err := writeAudit(ctx, tx, docID, "propose", doc.CreatedBy, "", doc.Status, doc.Checksum, ""); err != nil {
 		return "", err
 	}
 	return docID, nil
@@ -244,34 +266,48 @@ func (m *Module) Review(ctx context.Context, actor Actor, proposalID, decision, 
 
 // Approve 只有 user_bot 能调用，且必须绑定 checksum（ConfigCenter §4.3）。
 func (m *Module) Approve(ctx context.Context, actor Actor, proposalID, checksum string) error {
+	if err := validateApproval(actor, checksum); err != nil {
+		return err
+	}
+	return m.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return approveTx(ctx, tx, actor, proposalID, checksum)
+	})
+}
+
+func validateApproval(actor Actor, checksum string) error {
 	if actor.ID != UserBot {
 		return fmt.Errorf("%w: 只有 user_bot 能批准配置，收到 %q", ErrForbidden, actor.ID)
 	}
 	if checksum == "" {
 		return fmt.Errorf("%w: 批准必须携带 checksum", ErrInvalidSpec)
 	}
-	return m.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		doc, err := lockDoc(ctx, tx, proposalID)
-		if err != nil {
-			return err
-		}
-		if doc.Status != StatusProposed {
-			return fmt.Errorf("%w: 文档状态 %s 不可批准（可执行类须先过 security_review）", ErrBadTransition, doc.Status)
-		}
-		if doc.Checksum != checksum {
-			return fmt.Errorf("%w: 批准 checksum 与文档不一致，批准失效", ErrConflict)
-		}
-		if err := requireSecurityApproved(ctx, tx, doc); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE kernel_config_documents
-			   SET status='approved', approved_by='user_bot', approved_checksum=$2, approved_at=now()
-			 WHERE doc_id=$1`, proposalID, checksum); err != nil {
-			return fmt.Errorf("写入批准: %w", err)
-		}
-		return writeAudit(ctx, tx, proposalID, "approve", actor.ID, doc.Status, StatusApproved, checksum, "")
-	})
+	return nil
+}
+
+func approveTx(ctx context.Context, tx pgx.Tx, actor Actor, proposalID, checksum string) error {
+	if err := validateApproval(actor, checksum); err != nil {
+		return err
+	}
+	doc, err := lockDoc(ctx, tx, proposalID)
+	if err != nil {
+		return err
+	}
+	if doc.Status != StatusProposed {
+		return fmt.Errorf("%w: 文档状态 %s 不可批准（可执行类须先过 security_review）", ErrBadTransition, doc.Status)
+	}
+	if doc.Checksum != checksum {
+		return fmt.Errorf("%w: 批准 checksum 与文档不一致，批准失效", ErrConflict)
+	}
+	if err := requireSecurityApproved(ctx, tx, doc); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE kernel_config_documents
+		   SET status='approved', approved_by='user_bot', approved_checksum=$2, approved_at=now()
+		 WHERE doc_id=$1`, proposalID, checksum); err != nil {
+		return fmt.Errorf("写入批准: %w", err)
+	}
+	return writeAudit(ctx, tx, proposalID, "approve", actor.ID, doc.Status, StatusApproved, checksum, "")
 }
 
 // Reject 拒绝提案；user_bot 与 security_bot 均可。
@@ -298,75 +334,178 @@ func (m *Module) Reject(ctx context.Context, actor Actor, proposalID, reason str
 
 // Activate 在单事务内切 active + 更新投影 + 写 outbox + 写审计；失败整体回滚，不出现半生效。
 func (m *Module) Activate(ctx context.Context, actor Actor, proposalID string, cc CausalContext) error {
+	if err := validateActivationContext(cc); err != nil {
+		return err
+	}
+	return m.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		return activateTx(ctx, tx, actor, proposalID, cc)
+	})
+}
+
+func validateActivationContext(cc CausalContext) error {
 	if cc.CorrelationID == "" || cc.RootEnvelopeID == "" {
 		return fmt.Errorf("%w: 激活必须携带完整因果链", ErrInvalidSpec)
 	}
-	return m.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		doc, err := lockDoc(ctx, tx, proposalID)
-		if err != nil {
-			return err
-		}
-		if doc.Status != StatusApproved {
-			return fmt.Errorf("%w: 只有 approved 文档可激活，当前 %s", ErrBadTransition, doc.Status)
-		}
-		if doc.ApprovedChecksum == nil || *doc.ApprovedChecksum != doc.Checksum {
-			return fmt.Errorf("%w: approved_checksum 与文档 checksum 不一致（批准后内容被篡改）", ErrConflict)
-		}
-		if err := requireSecurityApproved(ctx, tx, doc); err != nil {
-			return err
-		}
-		activeVersion, err := activeVersionOf(ctx, tx, doc.ScopeType, doc.ScopeID, doc.ConfigKey)
-		if err != nil {
-			return err
-		}
-		base := int64(0)
-		if doc.BaseVersion != nil {
-			base = *doc.BaseVersion
-		}
-		if base != activeVersion {
-			return fmt.Errorf("%w: base_version=%d 与当前 active 版本 %d 不一致，请重新提案", ErrConflict, base, activeVersion)
-		}
-		spec, err := DecodeSpec(doc.Spec)
-		if err != nil {
-			return err
-		}
-		if err := requireSecretRefsExist(ctx, tx, spec); err != nil {
-			return err
-		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE kernel_config_documents SET status='retired', retired_at=now()
-			 WHERE scope_type=$1 AND scope_id=$2 AND config_key=$3 AND status='active'`,
-			doc.ScopeType, doc.ScopeID, doc.ConfigKey); err != nil {
-			return fmt.Errorf("退役旧 active 版本: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `
-			UPDATE kernel_config_documents SET status='active', activated_at=now() WHERE doc_id=$1`, proposalID); err != nil {
-			return fmt.Errorf("激活新版本: %w", err)
-		}
-		if err := projectActivation(ctx, tx, doc, spec); err != nil {
-			return err
-		}
-		payload, err := json.Marshal(map[string]any{
-			"scope_type": doc.ScopeType, "scope_id": doc.ScopeID, "config_key": doc.ConfigKey,
-			"version": doc.Version, "checksum": doc.Checksum,
-		})
-		if err != nil {
-			return fmt.Errorf("序列化配置变更事件: %w", err)
-		}
-		if _, err := tx.Exec(ctx, `
-			INSERT INTO kernel_event_outbox
-			  (event_id, event_type, correlation_id, causation_id, root_envelope_id,
-			   aggregate_type, aggregate_id, payload_json, status)
-			VALUES ($1,'kernel.config.changed',$2,$3,$4,'config',$5,$6::jsonb,'pending')`,
-			newID("evt_"), cc.CorrelationID, nullable(cc.CausationID), cc.RootEnvelopeID,
-			proposalID, string(payload)); err != nil {
-			return fmt.Errorf("写入配置变更事件: %w", err)
-		}
-		if err := writeAudit(ctx, tx, proposalID, "activate", actor.ID, doc.Status, StatusActive, doc.Checksum, ""); err != nil {
-			return err
-		}
-		return store.NotifyTx(ctx, tx, "kernel_config_changed", doc.ScopeType+":"+doc.ScopeID+":"+doc.ConfigKey)
+	return nil
+}
+
+func activateTx(ctx context.Context, tx pgx.Tx, actor Actor, proposalID string, cc CausalContext) error {
+	if err := validateActivationContext(cc); err != nil {
+		return err
+	}
+	doc, err := lockDoc(ctx, tx, proposalID)
+	if err != nil {
+		return err
+	}
+	if doc.Status != StatusApproved {
+		return fmt.Errorf("%w: 只有 approved 文档可激活，当前 %s", ErrBadTransition, doc.Status)
+	}
+	if doc.ApprovedChecksum == nil || *doc.ApprovedChecksum != doc.Checksum {
+		return fmt.Errorf("%w: approved_checksum 与文档 checksum 不一致（批准后内容被篡改）", ErrConflict)
+	}
+	if err := requireSecurityApproved(ctx, tx, doc); err != nil {
+		return err
+	}
+	activeVersion, err := activeVersionOf(ctx, tx, doc.ScopeType, doc.ScopeID, doc.ConfigKey)
+	if err != nil {
+		return err
+	}
+	base := int64(0)
+	if doc.BaseVersion != nil {
+		base = *doc.BaseVersion
+	}
+	if base != activeVersion {
+		return fmt.Errorf("%w: base_version=%d 与当前 active 版本 %d 不一致，请重新提案", ErrConflict, base, activeVersion)
+	}
+	spec, err := DecodeSpec(doc.Spec)
+	if err != nil {
+		return err
+	}
+	if err := requireSecretRefsExist(ctx, tx, spec); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE kernel_config_documents SET status='retired', retired_at=now()
+		 WHERE scope_type=$1 AND scope_id=$2 AND config_key=$3 AND status='active'`,
+		doc.ScopeType, doc.ScopeID, doc.ConfigKey); err != nil {
+		return fmt.Errorf("退役旧 active 版本: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE kernel_config_documents SET status='active', activated_at=now() WHERE doc_id=$1`, proposalID); err != nil {
+		return fmt.Errorf("激活新版本: %w", err)
+	}
+	if err := projectActivation(ctx, tx, doc, spec); err != nil {
+		return err
+	}
+	payload, err := json.Marshal(map[string]any{
+		"scope_type": doc.ScopeType, "scope_id": doc.ScopeID, "config_key": doc.ConfigKey,
+		"version": doc.Version, "checksum": doc.Checksum,
 	})
+	if err != nil {
+		return fmt.Errorf("序列化配置变更事件: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO kernel_event_outbox
+		  (event_id, event_type, correlation_id, causation_id, root_envelope_id,
+		   aggregate_type, aggregate_id, payload_json, status)
+		VALUES ($1,'kernel.config.changed',$2,$3,$4,'config',$5,$6::jsonb,'pending')`,
+		newID("evt_"), cc.CorrelationID, nullable(cc.CausationID), cc.RootEnvelopeID,
+		proposalID, string(payload)); err != nil {
+		return fmt.Errorf("写入配置变更事件: %w", err)
+	}
+	if err := writeAudit(ctx, tx, proposalID, "activate", actor.ID, doc.Status, StatusActive, doc.Checksum, ""); err != nil {
+		return err
+	}
+	return store.NotifyTx(ctx, tx, "kernel_config_changed", doc.ScopeType+":"+doc.ScopeID+":"+doc.ConfigKey)
+}
+
+// InitializePluginTx 在调用方的安装事务中初始化 plugin/default 配置（PluginMvp §3.1）。
+// actor 必须源自已验证的 user_bot 安装请求，cc 必须继承该请求的真实因果头。
+// 仅固定安装默认值随安装动作批准；后续配置仍须独立提案与审批。
+// 不开启或提交事务；调用方必须在任一步失败时回滚整个安装事务。
+func (m *Module) InitializePluginTx(ctx context.Context, tx pgx.Tx, actor Actor, pluginID string, cc CausalContext) (*Document, error) {
+	if err := requirePluginLifecycleActor(actor); err != nil {
+		return nil, err
+	}
+	if err := validScope(ScopePlugin, pluginID); err != nil {
+		return nil, err
+	}
+	if err := validateActivationContext(cc); err != nil {
+		return nil, err
+	}
+	// 安装派生的配置事件不是根消息，必须保留请求信封作为 causation_id。
+	if cc.CausationID == "" {
+		return nil, fmt.Errorf("%w: 插件初始化必须携带安装请求的 causation_id", ErrInvalidSpec)
+	}
+	doc, err := scanDoc(tx.QueryRow(ctx, `SELECT `+docColumns+` FROM kernel_config_documents
+		WHERE scope_type=$1 AND scope_id=$2 AND config_key=$3 AND status='active' FOR UPDATE`,
+		ScopePlugin, pluginID, DefaultConfigKey))
+	if err == nil {
+		return doc, nil // 已有 active 时不覆盖用户配置，也不重复审批或发布事件。
+	}
+	if !errors.Is(err, ErrNotFound) {
+		return nil, err
+	}
+	doc, err = prepareProposal(actor, ScopePlugin, pluginID, DefaultConfigKey,
+		json.RawMessage(`{"resource_limits":{"cpu_ms":100,"memory_mb":128}}`), 0)
+	if err != nil {
+		return nil, err
+	}
+	proposalID, err := proposeTx(ctx, tx, doc)
+	if err != nil {
+		return nil, err
+	}
+	if err := approveTx(ctx, tx, actor, proposalID, doc.Checksum); err != nil {
+		return nil, err
+	}
+	if err := activateTx(ctx, tx, actor, proposalID, cc); err != nil {
+		return nil, err
+	}
+	return lockDoc(ctx, tx, proposalID)
+}
+
+// RetirePluginTx 在卸载事务中仅退役该插件的 active 配置并逐份写审计，保留全部历史。
+// 不开启或提交事务；调用方必须在错误时回滚。其他 scope（含插件的 Bot 配置）不受影响。
+func (m *Module) RetirePluginTx(ctx context.Context, tx pgx.Tx, actor Actor, pluginID string) error {
+	if err := requirePluginLifecycleActor(actor); err != nil {
+		return err
+	}
+	if err := validScope(ScopePlugin, pluginID); err != nil {
+		return err
+	}
+	rows, err := tx.Query(ctx, `
+		UPDATE kernel_config_documents SET status='retired', retired_at=now()
+		 WHERE scope_type=$1 AND scope_id=$2 AND status='active'
+		 RETURNING doc_id, checksum`, ScopePlugin, pluginID)
+	if err != nil {
+		return fmt.Errorf("退役插件配置: %w", err)
+	}
+	defer rows.Close()
+	var retired []Document
+	for rows.Next() {
+		var doc Document
+		if err := rows.Scan(&doc.DocID, &doc.Checksum); err != nil {
+			return fmt.Errorf("读取退役插件配置: %w", err)
+		}
+		retired = append(retired, doc)
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("退役插件配置: %w", err)
+	}
+	rows.Close()
+	for _, doc := range retired {
+		if err := writeAudit(ctx, tx, doc.DocID, "retire", actor.ID, StatusActive, StatusRetired, doc.Checksum, ""); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func requirePluginLifecycleActor(actor Actor) error {
+	if actor.ID != UserBot || (actor.Kind != KindBot && actor.Kind != KindKernelRole) {
+		return fmt.Errorf("%w: 只有 user_bot 的 bot / kernel_role 身份能初始化或退役插件配置", ErrForbidden)
+	}
+	return nil
 }
 
 // Get 按读取 ACL 返回文档；每次读取写审计。monitor_bot 只拿版本 / checksum / 状态，不拿 spec 正文。

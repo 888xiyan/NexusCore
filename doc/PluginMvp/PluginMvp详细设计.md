@@ -470,3 +470,29 @@ security-revoke <decision_id> <reason>
 | 6.4 / 6.5 / 6.6 | 5.5 规则 1 / 8 + 6.9 规则 3 + BotMvp §8.6 / §8.7 |
 | 7 | 8.4 记忆插件存储边界 / 8.1 namespace 规范 |
 | 10 | 5.1 传输路由 / D-14 插件自定义协议 |
+
+## 14. 修订记录
+
+### 14.1 M2 实现落地与工程细化（2026-11-13）
+
+插件 MVP 与两级进程管理模型已在 M2 交付落地并通过全套自动化验证。结合工程落地与代码审查，以下设计细节与偏离做正式归档：
+
+1. **防 PID 复用安全信号发送机制（SignalProcessGroup 与僵尸过滤）**：
+   - 在 `internal/osproc` 实现 `SignalProcessGroup(pid, pgid, start, sig)`：
+     - 校验组长身份完整性（`pid > 1 && pgid == pid && start > 0`）；
+     - 读取 `/proc/<pid>/stat` 校验 start_time 与 PGRP 是否完全一致；
+     - 显式过滤僵尸进程（`'Z'` 与 `'X'` 状态不视为活体目标）；
+     - 原进程消失或 ESRCH 时转化为 `os.ErrNotExist` 并 fail closed，绝不向可能已被其他程序复用的 PID/PGID 发送误杀信号。
+2. **生命周期并发互斥与行级排他锁（lifecycleMu + FOR UPDATE）**：
+   - `hub/plugin.Manager` 引入 `lifecycleMu` 互斥锁，确保插件的安装、安全审批、启用、禁用、卸载操作严格串行化；
+   - 数据库事务内部对 `kernel_plugins`、`kernel_security_decisions` 与 `kernel_plugin_processes` 加 `FOR UPDATE` 行锁，防范并发 TOCTOU 与竞态状态覆盖。
+3. **强制终止全流程代际核验与进程组退出等待**：
+   - supervisor 的 `KillPluginProcess` 强制核对代际元组（`owner_bot_id`、`owner_instance_id`、`pid`、`pgid`、`pid_start_time`）；
+   - 发送 SIGKILL 后通过 `waitPluginGroupExit` 轮询确保整棵进程树（含所有子/孙进程）完全退出；双写 `kernel_security_decisions`（`decided_by='supervisor'`）。
+4. **客户端控制命令全链路因果链闭环（硬约束 12 落实）**：
+   - CLI 中的插件生命周期控制命令（`disable`, `uninstall`, `stop`, `start`, `kill`）统一在客户端构造根因果链信封（`postPluginControl`，`MsgControl` / `ChannelCLI`），并将信封注入请求体，使每一次管理动作在内核均有完整的因果链追踪。
+5. **开发环境本地回环绑定（docker-compose 隔离）**：
+   - `docker-compose.yml` 中的 PostgreSQL 开发端口严格绑定在 `127.0.0.1`，防止数据库监听暴露至外部网络。
+6. **M2 验收结果（第 12 节全量项）**：
+   - 验收通过：涵盖插件安装审查激活、多 Bot 模板、消息路由、优雅关闭、忽略 SIGTERM 超时杀进程组、`plugin kill --confirm` 强制终止、PID 复用注入防御、孤儿级联回收、配置版本关联与卸载审计。自动化验收见 `scripts/smoke-m2.sh`。
+

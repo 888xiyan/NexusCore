@@ -9,10 +9,13 @@ import (
 	"fmt"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
 	"github.com/888xiyan/NexusCore/hub/config"
+	"github.com/888xiyan/NexusCore/hub/ingress"
+	"github.com/888xiyan/NexusCore/internal/envelope"
 	"github.com/888xiyan/NexusCore/hub/registry"
 	"github.com/888xiyan/NexusCore/hub/store"
 	"github.com/888xiyan/NexusCore/hub/supervisor"
@@ -80,6 +83,9 @@ type SecurityDecision struct {
 
 // ProcessReport 由 owner bot 上报其持有的插件进程 PID 与状态
 type ProcessReport struct {
+	Envelope envelope.Envelope `json:"envelope"`
+	OwnerPID int `json:"owner_pid"`
+	OwnerStartTime int64 `json:"owner_start_time"`
 	PluginID      string `json:"plugin_id"`
 	OwnerBotID    string `json:"owner_bot_id"`
 	PID           int    `json:"pid"`
@@ -110,11 +116,35 @@ type PluginProcessInfo struct {
 	LastError       *string    `json:"last_error,omitempty"`
 }
 
+type ControlRequest struct {
+	Envelope envelope.Envelope `json:"envelope"`
+	Credential string `json:"-"`
+}
+
 type Manager struct {
 	st  *store.Store
 	cfg *config.Module
 	sup *supervisor.Supervisor
 	reg *registry.Registry
+	ing *ingress.Ingress
+	lifecycleMu sync.Mutex
+}
+
+func (m *Manager) SetIngress(ing *ingress.Ingress) { m.ing = ing }
+
+func requireRole(actor config.Actor, ids ...string) error {
+	if actor.Kind == config.KindBot || actor.Kind == config.KindKernelRole {
+		for _, id := range ids {
+			if actor.ID == id { return nil }
+		}
+	}
+	return fmt.Errorf("%w: 主体 %s(%s) 无权执行此操作", config.ErrForbidden, actor.ID, actor.Kind)
+}
+
+func manifestChecksum(raw []byte) (string, error) {
+	v, err := config.DecodeSpec(raw)
+	if err != nil { return "", err }
+	return config.Checksum(v)
 }
 
 func NewManager(st *store.Store, cfg *config.Module, sup *supervisor.Supervisor, reg *registry.Registry) *Manager {
@@ -142,7 +172,16 @@ func ValidateManifest(m *Manifest) error {
 		config.SecurityBot: true,
 	}
 
+	if m.Binary != "" {
+		digest, err := hex.DecodeString(m.BinaryDigest)
+		if err != nil || len(digest) != sha256.Size || strings.ToLower(m.BinaryDigest) != m.BinaryDigest {
+			return fmt.Errorf("%w: binary 必须绑定有效的 SHA256 binary_digest", ErrInvalidManifest)
+		}
+	}
+	seen := make(map[string]bool)
 	for i, bt := range m.BotTemplates {
+		if seen[bt.BotID] { return fmt.Errorf("%w: 重复的 bot_id %q", ErrInvalidManifest, bt.BotID) }
+		seen[bt.BotID] = true
 		if !botIDPattern.MatchString(bt.BotID) {
 			return fmt.Errorf("%w: bot_id %q 不符合规范 ^[a-z0-9_]{5,64}$", ErrInvalidManifest, bt.BotID)
 		}
@@ -176,45 +215,44 @@ func ValidateManifest(m *Manifest) error {
 
 // Install 安装插件制品并提交 security 审查。
 func (m *Manager) Install(ctx context.Context, actor config.Actor, raw []byte) (*Manifest, int64, error) {
+	if err := requireRole(actor, config.UserBot); err != nil { return nil, 0, err }
 	var mf Manifest
 	if err := json.Unmarshal(raw, &mf); err != nil {
 		return nil, 0, fmt.Errorf("%w: JSON 解析失败: %v", ErrInvalidManifest, err)
 	}
-	if err := ValidateManifest(&mf); err != nil {
-		return nil, 0, err
-	}
-	h := sha256.Sum256(raw)
-	digest := hex.EncodeToString(h[:])
-
-	namespace := strings.TrimPrefix(mf.PluginID, "plugin_")
-
-	// 写入 kernel_plugins 表（status=installed）
-	_, err := m.st.Pool().Exec(ctx, `
-		INSERT INTO kernel_plugins (plugin_id, plugin_type, display_name, namespace, manifest_digest, manifest_json, status)
-		VALUES ($1, $2, $3, $4, $5, $6, 'installed')
-		ON CONFLICT (plugin_id) DO UPDATE
-		SET plugin_type=EXCLUDED.plugin_type, display_name=EXCLUDED.display_name, namespace=EXCLUDED.namespace,
-		    manifest_digest=EXCLUDED.manifest_digest, manifest_json=EXCLUDED.manifest_json, status='installed', updated_at=now()`,
-		mf.PluginID, mf.PluginType, mf.Name, namespace, digest, raw)
-	if err != nil {
-		return nil, 0, fmt.Errorf("写入 kernel_plugins: %w", err)
-	}
-
-	// 提交 security 审查请求（action=approve, decision=pending）
+	if err := ValidateManifest(&mf); err != nil { return nil, 0, err }
+	digest, err := manifestChecksum(raw)
+	if err != nil { return nil, 0, err }
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
 	var decisionID int64
-	err = m.st.Pool().QueryRow(ctx, `
-		INSERT INTO kernel_security_decisions (subject_type, subject_id, action, decision, requested_by, decided_by, checksum)
-		VALUES ('plugin', $1, 'approve', 'pending', $2, 'security_bot', $3)
-		RETURNING decision_id`, mf.PluginID, actor.ID, digest).Scan(&decisionID)
-	if err != nil {
-		return nil, 0, fmt.Errorf("提交 security 审查: %w", err)
-	}
-
+	err = m.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		tag, err := tx.Exec(ctx, `
+			INSERT INTO kernel_plugins (plugin_id, plugin_type, display_name, namespace, manifest_digest, manifest_json, status)
+			VALUES ($1,$2,$3,$4,$5,$6,'installed')
+			ON CONFLICT (plugin_id) DO UPDATE SET
+			 plugin_type=EXCLUDED.plugin_type, display_name=EXCLUDED.display_name,
+			 namespace=EXCLUDED.namespace, manifest_digest=EXCLUDED.manifest_digest,
+			 manifest_json=EXCLUDED.manifest_json, status='installed', revoked_at=NULL, updated_at=now()
+			WHERE kernel_plugins.status='uninstalled'`,
+			mf.PluginID, mf.PluginType, mf.Name, strings.TrimPrefix(mf.PluginID, "plugin_"), digest, raw)
+		if err != nil { return fmt.Errorf("登记插件安装: %w", err) }
+		if tag.RowsAffected() != 1 { return fmt.Errorf("%w: 插件已安装，不能覆盖待审或运行中的清单", config.ErrConflict) }
+		if _, err := tx.Exec(ctx, `UPDATE kernel_security_decisions SET decision='rejected', reason='superseded_install', updated_at=now() WHERE subject_type='plugin' AND subject_id=$1 AND decision='pending'`, mf.PluginID); err != nil { return err }
+		if err := tx.QueryRow(ctx, `
+			INSERT INTO kernel_security_decisions (subject_type, subject_id, action, decision, requested_by, decided_by, checksum)
+			VALUES ('plugin',$1,'approve','pending',$2,'security_bot',$3) RETURNING decision_id`, mf.PluginID, actor.ID, digest).Scan(&decisionID); err != nil {
+			return fmt.Errorf("提交 security 审查: %w", err)
+		}
+		return nil
+	})
+	if err != nil { return nil, 0, err }
 	return &mf, decisionID, nil
 }
 
 // SecurityList 列出待审查或指定状态的 security 决定。
 func (m *Manager) SecurityList(ctx context.Context, actor config.Actor, status string) ([]SecurityDecision, error) {
+	if err := requireRole(actor, config.UserBot, config.SecurityBot); err != nil { return nil, err }
 	q := `SELECT decision_id, subject_type, subject_id, action, decision, requested_by, decided_by, COALESCE(reason, ''), created_at, updated_at
 	        FROM kernel_security_decisions`
 	var args []any
@@ -242,54 +280,38 @@ func (m *Manager) SecurityList(ctx context.Context, actor config.Actor, status s
 }
 
 // SecurityApprove 批准安全决定并激活对应资源（如插件）。
-func (m *Manager) SecurityApprove(ctx context.Context, actor config.Actor, decisionID int64) error {
-	var subjectType, subjectID, dec string
-	err := m.st.Pool().QueryRow(ctx, `
-		SELECT subject_type, subject_id, decision
-		  FROM kernel_security_decisions WHERE decision_id=$1`, decisionID).Scan(&subjectType, &subjectID, &dec)
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			return fmt.Errorf("%w: decision_id %d", ErrDecisionNotFound, decisionID)
+func (m *Manager) SecurityApprove(ctx context.Context, actor config.Actor, decisionID int64, cc config.CausalContext) error {
+	if err := requireRole(actor, config.UserBot, config.SecurityBot); err != nil { return err }
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+	return m.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		var subjectType, subjectID, decision, requestedBy, checksum, action string
+		if err := tx.QueryRow(ctx, `SELECT subject_type, subject_id, decision, requested_by, COALESCE(checksum,''), action FROM kernel_security_decisions WHERE decision_id=$1 FOR UPDATE`, decisionID).Scan(&subjectType,&subjectID,&decision,&requestedBy,&checksum,&action); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) { return ErrDecisionNotFound }
+			return fmt.Errorf("读取安全决定: %w", err)
 		}
-		return fmt.Errorf("查询审查决定: %w", err)
-	}
-	if dec == "approved" {
-		return nil // 幂等
-	}
-
-	if subjectType == "plugin" {
-		return m.activatePlugin(ctx, actor, decisionID, subjectID)
-	}
-
-	// 其余 subject_type 更新状态
-	_, err = m.st.Pool().Exec(ctx, `
-		UPDATE kernel_security_decisions
-		   SET decision='approved', decided_by=$2, updated_at=now()
-		 WHERE decision_id=$1`, decisionID, actor.ID)
-	return err
+		if subjectType != "plugin" || action != "approve" || requestedBy != config.UserBot {
+			return fmt.Errorf("%w: 此入口仅处理 user_bot 发起的插件安装审查", config.ErrForbidden)
+		}
+		var raw []byte
+		var digest, state string
+		if err := tx.QueryRow(ctx, `SELECT manifest_json, manifest_digest, status FROM kernel_plugins WHERE plugin_id=$1 FOR UPDATE`, subjectID).Scan(&raw,&digest,&state); err != nil { return err }
+		actualDigest, err := manifestChecksum(raw)
+		if err != nil { return err }
+		if checksum == "" || checksum != digest || actualDigest != digest { return fmt.Errorf("%w: 审批绑定的清单已变化", config.ErrConflict) }
+		if decision == "approved" && state == "enabled" { return nil }
+		if decision != "pending" || state != "installed" { return fmt.Errorf("%w: 插件或审批不处于待激活状态", config.ErrBadTransition) }
+		var mf Manifest
+		if err := json.Unmarshal(raw,&mf); err != nil { return err }
+		if err := ValidateManifest(&mf); err != nil { return err }
+		return m.activatePlugin(ctx, tx, actor, decisionID, subjectID, mf, digest, cc)
+	})
 }
 
-func (m *Manager) activatePlugin(ctx context.Context, actor config.Actor, decisionID int64, pluginID string) error {
-	var raw []byte
-	var digest string
-	err := m.st.Pool().QueryRow(ctx, `
-		SELECT manifest_json, manifest_digest
-		  FROM kernel_plugins WHERE plugin_id=$1`, pluginID).Scan(&raw, &digest)
-	if err != nil {
-		return fmt.Errorf("读取插件清单 %s: %w", pluginID, err)
-	}
-	var mf Manifest
-	if err := json.Unmarshal(raw, &mf); err != nil {
-		return fmt.Errorf("解析插件清单: %w", err)
-	}
-
-	tx, err := m.st.Pool().Begin(ctx)
-	if err != nil {
-		return err
-	}
-	defer tx.Rollback(ctx)
-
-	// 更新审查决定
+func (m *Manager) activatePlugin(ctx context.Context, tx pgx.Tx, actor config.Actor, decisionID int64, pluginID string, mf Manifest, digest string, cc config.CausalContext) error {
+	if m.sup == nil { return errors.New("未配置 supervisor，无法取得可信运行时制品") }
+	binPath, binDigest, err := m.sup.RuntimeArtifact()
+	if err != nil { return err }
 	_, err = tx.Exec(ctx, `
 		UPDATE kernel_security_decisions
 		   SET decision='approved', decided_by=$2, updated_at=now()
@@ -339,14 +361,6 @@ func (m *Manager) activatePlugin(ctx context.Context, actor config.Actor, decisi
 		startTimeout := bt.StartTimeoutSec
 		if startTimeout <= 0 {
 			startTimeout = 30
-		}
-		var binPath, binDigest string
-		_ = tx.QueryRow(ctx, `SELECT binary_path, binary_digest FROM bot_manifest WHERE bot_id='user_bot'`).Scan(&binPath, &binDigest)
-		if binPath == "" {
-			binPath = "bin/bot-runtime"
-		}
-		if binDigest == "" {
-			binDigest = strings.Repeat("0", 64)
 		}
 
 		var memProfile any

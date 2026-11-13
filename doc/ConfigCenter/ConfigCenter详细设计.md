@@ -264,3 +264,22 @@ NexusCore config secret add --provider env --locator NAME --description "..."
 | 5 | 6.7 / 6.9 / 6.11 |
 | 6 | 3.3.1 / 5.5 / PluginMvp §6 |
 | 7 / 8 / 9 | 11 Step 0 / Step 1、开发规划 M1 / M2 |
+
+## 11. 修订记录
+
+### 11.1 M2 实现落地与工程细化（2026-11-13）
+
+配置中心完整审批流已在 M2 交付落地并通过全套自动化验证。结合工程落地与代码审查，以下设计细节与偏离做正式归档：
+
+1. **提案解耦与复合事务复用（prepareProposal 与 proposeTx）**：
+   - 将配置提案拆分为规格预校验（`prepareProposal`：范围校验、密钥扫描、规范化 JSON 与 Checksum 计算）与事务写入（`proposeTx`：并发冲突检查、单调版本分配与审计落库）。
+   - 使得插件安装/升级等复合生命周期流程能够原子性嵌入配置提案逻辑，避免嵌套独立事务产生的 TOCTOU 竞争与回滚失效。
+2. **并发审批行级排他锁（FOR UPDATE）**：
+   - `Approve` 流程中在锁定当前处于 `proposed` 或 `security_approved` 状态的提案文档时，显式使用 `SELECT ... FOR UPDATE` 行级排他锁，杜绝并发审批冲突与状态覆盖；旧版本 `archived` 与新版本激活严格保持原子性。
+3. **真实交互终端强约束（isTerminal 防御）**：
+   - CLI 中的 `config approve` 与 `config set` 强制要求在真实交互终端（TTY）执行，底层基于 `unix.IoctlGetTermios(..., unix.TCGETS)` 准确检测，拒绝字符设备伪装（如 `/dev/null` 重定向）；
+   - 彻底封禁 `--yes` 等非交互参数或管道标准输入重定向；
+   - 交互界面强制展示服务端计算的完整变更 diff 对照与前 12 位 SHA256 checksum 摘要，必须由操作人员手工键入 `yes` 回车确认，防止自动化脚本静默篡改配置。
+4. **M2 验收结果**：
+   - 验收项（提案不生效、无 user_bot 批准不可激活、checksum 变更审批失效、安全预审门禁、secret 明文阻断、版本漂移巡检）全量通过，集成验证见 `scripts/smoke-m2.sh`。
+

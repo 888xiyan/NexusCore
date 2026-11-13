@@ -1004,7 +1004,10 @@ func (a *API) handleSecurityList(w http.ResponseWriter, r *http.Request) {
 }
 
 type securityApproveReq struct {
-	DecisionID int64 `json:"decision_id"`
+	DecisionID     int64  `json:"decision_id"`
+	CorrelationID  string `json:"correlation_id"`
+	CausationID    string `json:"causation_id"`
+	RootEnvelopeID string `json:"root_envelope_id"`
 }
 
 func (a *API) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
@@ -1022,7 +1025,24 @@ func (a *API) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON")
 		return
 	}
-	if err := a.pm.SecurityApprove(r.Context(), actor, req.DecisionID); err != nil {
+	cc := config.CausalContext{
+		CorrelationID:  req.CorrelationID,
+		CausationID:    req.CausationID,
+		RootEnvelopeID: req.RootEnvelopeID,
+	}
+	if cc.CorrelationID == "" {
+		id := "sec_" + fmt.Sprint(time.Now().UnixNano())
+		cc.CorrelationID = id
+		cc.CausationID = id
+		cc.RootEnvelopeID = id
+	}
+	if cc.CausationID == "" {
+		cc.CausationID = cc.CorrelationID
+	}
+	if cc.RootEnvelopeID == "" {
+		cc.RootEnvelopeID = cc.CorrelationID
+	}
+	if err := a.pm.SecurityApprove(r.Context(), actor, req.DecisionID, cc); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
 		return
 	}

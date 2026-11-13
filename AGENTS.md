@@ -163,6 +163,7 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 13. 在配置 spec 中存明文密钥 / token；配置中心只允许 `secret_ref`。
 14. 把 MCP / Skill 配置或运行时塞进内核或配置中心。
 15. 把 LISTEN/NOTIFY 当作可靠投递（必须保留兜底轮询与崩溃扫描）。
+16. 绕过交互终端安全机制（如 stdin 重定向、脚本管道注入或跳过确认标志）批准配置；配置批准必须在真实交互终端由 `user_bot` 确认。
 
 ## 需要用户确认的场景
 

@@ -6,8 +6,11 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -21,15 +24,16 @@ import (
 	"syscall"
 	"time"
 
+	"google.golang.org/grpc"
+	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/metadata"
+
 	"github.com/888xiyan/NexusCore/hub/supervisor"
 	"github.com/888xiyan/NexusCore/hub/transport"
 	"github.com/888xiyan/NexusCore/internal/envelope"
 	"github.com/888xiyan/NexusCore/internal/osproc"
 	"github.com/888xiyan/NexusCore/internal/version"
 	pb "github.com/888xiyan/NexusCore/proto/gen/v1"
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-	"google.golang.org/grpc/metadata"
 )
 
 func main() {
@@ -87,6 +91,8 @@ func main() {
 	if b.pluginBinary != "" {
 		if err := b.startPluginProcess(ctx); err != nil {
 			fmt.Fprintf(os.Stderr, "owner bot exec 插件进程失败: %v\n", err)
+			// start 已先回收自己创建的子树；非零退出交给 supervisor 重试。
+			os.Exit(1)
 		}
 	}
 
@@ -95,8 +101,14 @@ func main() {
 		fmt.Fprintln(os.Stderr, "任务流结束:", err)
 	}
 	// 先子后父：退出前优雅关闭插件进程（PluginMvp §6.4）
-	b.stopPluginProcess()
-	_ = b.deregister(context.WithoutCancel(ctx))
+	if err := b.stopPluginProcess(); err != nil {
+		fmt.Fprintln(os.Stderr, "关闭插件进程失败:", err)
+	}
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 5*time.Second)
+	defer cancel()
+	if err := b.deregister(cleanupCtx); err != nil {
+		fmt.Fprintln(os.Stderr, "Deregister 失败:", err)
+	}
 }
 
 type bot struct {
@@ -112,10 +124,11 @@ type bot struct {
 	pluginID     string
 	pluginBinary string
 	pluginDigest string
-	childCmd     *exec.Cmd
-	childPID     int
-	childPGID    int
-	childStart   int64
+
+	// 独立于任务租约锁：启动、停止、终态报告完全串行，旧代报告成功前不能开新代。
+	pluginMu        sync.Mutex
+	child           *pluginProcess
+	pluginStopGrace time.Duration // 零值使用 PluginMvp §6.4 默认 15s
 
 	mu     sync.Mutex
 	leases map[string]string // job_id -> lease_token
@@ -156,88 +169,224 @@ func (b *bot) deregister(ctx context.Context) error {
 	return err
 }
 
+const (
+	pluginReportTimeout = 5 * time.Second
+	pluginExitPoll      = 25 * time.Millisecond
+)
+
+// pluginProcess 只属于一次 exec，所有可变字段均由 bot.pluginMu 保护。
+// 未 Wait 的组长（含僵尸）钉住 PID，清理完整进程组后才能回收这个身份锚点。
+// done 在唯一一次 Wait 后关闭；终态上报失败仍保留本实例供下一次控制重试。
+type pluginProcess struct {
+	cmd       *exec.Cmd
+	pid       int
+	pgid      int
+	start     int64
+	done      chan struct{}
+	waited    bool
+	state     string
+	lastError string
+}
+
 func (b *bot) startPluginProcess(ctx context.Context) error {
+	b.pluginMu.Lock()
+	defer b.pluginMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if p := b.child; p != nil {
+		if !p.waited && osproc.IsProcessAlive(p.pid, p.start) {
+			return nil // 同代重复 start，不重复 exec。
+		}
+		if err := b.finishPluginProcessLocked(p, "", ""); err != nil {
+			return fmt.Errorf("上一代插件尚未完成终态报告: %w", err)
+		}
+	}
+	if b.pluginID == "" || b.pluginBinary == "" {
+		return fmt.Errorf("启动插件进程: 缺少 plugin_id 或 plugin_binary（非 owner bot）")
+	}
+	if err := verifyPluginDigest(b.pluginBinary, b.pluginDigest); err != nil {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	cmd := exec.Command(b.pluginBinary)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
 	if err := cmd.Start(); err != nil {
-		_ = b.reportPluginProcess("failed", 0, 0, 0, err.Error())
-		return err
+		return fmt.Errorf("exec 插件进程: %w", err)
 	}
 	info, err := osproc.ReadProcessInfo(cmd.Process.Pid)
 	if err != nil {
-		_ = cmd.Process.Kill()
-		return err
+		// 没有可靠身份绝不能猜 pgid 发信号。此异常路径仍只 Wait 一次；
+		// /proc 对同用户不可读时必须 fail closed，而不是误杀其他进程。
+		go func() {
+			if waitErr := cmd.Wait(); waitErr != nil {
+				fmt.Fprintln(os.Stderr, "回收无法识别的插件子进程:", waitErr)
+			}
+		}()
+		return fmt.Errorf("读取新插件进程身份（拒绝未校验信号）: %w", err)
 	}
-	b.childCmd = cmd
-	b.childPID = info.PID
-	b.childPGID = info.PGRP
-	b.childStart = info.StartTime
-
-	_ = b.reportPluginProcess("running", info.PID, info.PGRP, info.StartTime, "")
-
-	go func() {
-		err := cmd.Wait()
-		state := "stopped"
-		lastErr := ""
-		if err != nil {
-			state = "crashed"
-			lastErr = err.Error()
-		}
-		_ = b.reportPluginProcess(state, b.childPID, b.childPGID, b.childStart, lastErr)
-	}()
+	p := &pluginProcess{cmd: cmd, pid: info.PID, pgid: info.PGRP, start: info.StartTime, done: make(chan struct{})}
+	b.child = p
+	if info.PGRP != info.PID || info.StartTime <= 0 || info.PPID != os.Getpid() {
+		return fmt.Errorf("新插件进程身份不合法: pid=%d pgid=%d ppid=%d start=%d", info.PID, info.PGRP, info.PPID, info.StartTime)
+	}
+	if err := b.reportPluginProcess(ctx, "running", p.pid, p.pgid, p.start, ""); err != nil {
+		// 首报失败不能留下未登记的进程；清理不继承已取消的请求 context。
+		cleanupErr := b.finishPluginProcessLocked(p, "failed", err.Error())
+		return errors.Join(fmt.Errorf("插件 running 首报失败: %w", err), cleanupErr)
+	}
+	go b.watchPluginProcess(p)
 	return nil
 }
 
-func (b *bot) stopPluginProcess() {
-	if b.childCmd != nil && b.childCmd.Process != nil && b.childPID > 0 {
-		_ = osproc.KillProcessGroup(b.childPGID, syscall.SIGTERM)
-		done := make(chan struct{})
-		go func() {
-			for i := 0; i < 20; i++ {
-				if !osproc.IsProcessAlive(b.childPID, b.childStart) {
-					close(done)
-					return
-				}
-				time.Sleep(100 * time.Millisecond)
-			}
-			_ = osproc.KillProcessGroup(b.childPGID, syscall.SIGKILL)
-			close(done)
-		}()
+func verifyPluginDigest(path, digest string) error {
+	want, err := hex.DecodeString(digest)
+	if err != nil || len(want) != sha256.Size {
+		return fmt.Errorf("插件制品摘要必须为 64 位 SHA256 十六进制")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("打开插件制品: %w", err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return fmt.Errorf("计算插件制品 SHA256: %w", err)
+	}
+	if !bytes.Equal(h.Sum(nil), want) {
+		return fmt.Errorf("插件制品 SHA256 与 plugin_digest 不符，拒绝执行")
+	}
+	return nil
+}
+
+func (b *bot) watchPluginProcess(p *pluginProcess) {
+	ticker := time.NewTicker(pluginExitPoll)
+	defer ticker.Stop()
+	for {
 		select {
-		case <-done:
-		case <-time.After(3 * time.Second):
-			_ = osproc.KillProcessGroup(b.childPGID, syscall.SIGKILL)
+		case <-p.done:
+			return
+		case <-ticker.C:
+			b.pluginMu.Lock()
+			if b.child != p || p.waited {
+				b.pluginMu.Unlock()
+				return
+			}
+			if !osproc.IsProcessAlive(p.pid, p.start) {
+				err := b.finishPluginProcessLocked(p, "", "")
+				b.pluginMu.Unlock()
+				if err != nil {
+					fmt.Fprintln(os.Stderr, "回收/上报插件终态失败:", err)
+				}
+				return
+			}
+			b.pluginMu.Unlock()
 		}
-		_ = b.reportPluginProcess("stopped", b.childPID, b.childPGID, b.childStart, "")
 	}
 }
 
-func (b *bot) reportPluginProcess(state string, pid, pgid int, startTime int64, lastErr string) error {
-	rep := map[string]any{
-		"plugin_id":      b.pluginID,
-		"owner_bot_id":   b.id,
-		"pid":            pid,
-		"pgid":           pgid,
-		"pid_start_time": startTime,
-		"binary_digest":  b.pluginDigest,
-		"config_version": b.configVersion,
-		"state":          state,
-		"last_error":     lastErr,
+func (b *bot) stopPluginProcess() error {
+	b.pluginMu.Lock()
+	defer b.pluginMu.Unlock()
+	p := b.child
+	if p == nil {
+		return nil
 	}
-	body, _ := json.Marshal(rep)
-	req, err := http.NewRequest(http.MethodPost, b.httpBase+"/v1/plugins/process/report", bytes.NewReader(body))
+	if p.waited || !osproc.IsProcessAlive(p.pid, p.start) {
+		return b.finishPluginProcessLocked(p, "", "")
+	}
+	if err := osproc.SignalProcessGroup(p.pid, p.pgid, p.start, syscall.SIGTERM); err != nil {
+		return fmt.Errorf("优雅关闭插件进程组: %w", err)
+	}
+	grace := b.pluginStopGrace
+	if grace <= 0 {
+		grace = 15 * time.Second
+	}
+	timer := time.NewTimer(grace)
+	defer timer.Stop()
+	ticker := time.NewTicker(pluginExitPoll)
+	defer ticker.Stop()
+	for osproc.IsProcessAlive(p.pid, p.start) {
+		select {
+		case <-ticker.C:
+		case <-timer.C:
+			return b.finishPluginProcessLocked(p, "killed", "stop_timeout")
+		}
+	}
+	return b.finishPluginProcessLocked(p, "stopped", "")
+}
+
+// finishPluginProcessLocked 先校验并清理组，再唯一一次 Wait，最后报告终态。
+// SIGKILL 也清除已退出组长留下的后代；在 Wait 前 /proc 仍能验证原组身份。
+func (b *bot) finishPluginProcessLocked(p *pluginProcess, state, lastError string) error {
+	if !p.waited {
+		if err := osproc.SignalProcessGroup(p.pid, p.pgid, p.start, syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("回收插件进程组: %w", err)
+		}
+		waitErr := p.cmd.Wait()
+		p.waited = true
+		close(p.done)
+		p.state, p.lastError = state, lastError
+		if p.state == "" {
+			p.state = "stopped"
+			if waitErr != nil {
+				p.state, p.lastError = "crashed", waitErr.Error()
+			}
+		}
+	}
+	if err := b.reportPluginProcess(context.Background(), p.state, p.pid, p.pgid, p.start, p.lastError); err != nil {
+		return fmt.Errorf("上报插件终态 %s: %w", p.state, err)
+	}
+	if b.child == p {
+		b.child = nil
+	}
+	return nil
+}
+
+func (b *bot) reportPluginProcess(ctx context.Context, state string, pid, pgid int, startTime int64, lastErr string) error {
+	owner, err := osproc.ReadProcessInfo(os.Getpid())
 	if err != nil {
-		return err
+		return fmt.Errorf("读取 owner bot 进程身份: %w", err)
+	}
+	rep := map[string]any{
+		"envelope":         envelope.NewRoot(b.id, envelope.ChannelHealth, envelope.MsgEvent, "plugin_process_"+randomID()),
+		"plugin_id":        b.pluginID,
+		"owner_bot_id":     b.id,
+		"owner_pid":        owner.PID,
+		"owner_start_time": owner.StartTime,
+		"pid":              pid,
+		"pgid":             pgid,
+		"pid_start_time":   startTime,
+		"binary_digest":    b.pluginDigest,
+		"config_version":   b.configVersion,
+		"state":            state,
+		"last_error":       lastErr,
+	}
+	body, err := json.Marshal(rep)
+	if err != nil {
+		return fmt.Errorf("编码插件进程报告: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(ctx, pluginReportTimeout)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, b.httpBase+"/v1/plugins/process/report", bytes.NewReader(body))
+	if err != nil {
+		return fmt.Errorf("创建插件进程报告请求: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-Nexus-Credential", b.cred)
-	resp, err := http.DefaultClient.Do(req)
+	client := &http.Client{Timeout: pluginReportTimeout}
+	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return fmt.Errorf("发送插件进程报告: %w", err)
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("插件进程报告被拒（HTTP %d）", resp.StatusCode)
+	}
 	return nil
 }
 
@@ -312,6 +461,10 @@ func (b *bot) handleTask(ctx context.Context, task *pb.TaskAssignment) error {
 		return fmt.Errorf("解析任务因果上下文: %w", err)
 	}
 
+	if causal.JobType == "plugin.control" {
+		return b.handlePluginControl(ctx, task)
+	}
+
 	// 按 payload_ref 自行拉取业务载荷（内核不做上下文水合推送）
 	text := ""
 	if task.PayloadRef != "" {
@@ -343,6 +496,60 @@ func (b *bot) handleTask(ctx context.Context, task *pb.TaskAssignment) error {
 		JobId: task.JobId, LeaseToken: task.LeaseToken, ResultRef: echoed,
 	})
 	return err
+}
+
+// pluginControlResult 经 AckTask.ResultRef 返回，拒绝也结束本次任务，让调用方可见错误。
+// 它不是 echo/reply，不额外投递业务信封；入口对 user_bot 的授权由 hub 执行。
+type pluginControlResult struct {
+	PluginID string `json:"plugin_id"`
+	Action   string `json:"action"`
+	OK       bool   `json:"ok"`
+	Error    string `json:"error,omitempty"`
+}
+
+func (b *bot) handlePluginControl(ctx context.Context, task *pb.TaskAssignment) error {
+	var control struct {
+		PluginID string `json:"plugin_id"`
+		Action   string `json:"action"`
+	}
+	controlErr := func() error {
+		if task.PayloadRef == "" {
+			return fmt.Errorf("插件控制任务缺少 payload_ref")
+		}
+		payload, err := b.fetchPayload(ctx, task.PayloadRef)
+		if err != nil {
+			return err
+		}
+		if err := json.Unmarshal(payload, &control); err != nil {
+			return fmt.Errorf("解析插件控制载荷: %w", err)
+		}
+		if b.pluginID == "" || control.PluginID != b.pluginID || b.pluginBinary == "" {
+			return fmt.Errorf("拒绝插件控制: plugin_id 不符或当前 bot 不是 owner")
+		}
+		switch control.Action {
+		case "start":
+			return b.startPluginProcess(ctx)
+		case "stop":
+			return b.stopPluginProcess()
+		default:
+			return fmt.Errorf("拒绝插件控制 action=%q，仅允许 start/stop", control.Action)
+		}
+	}()
+	result := pluginControlResult{PluginID: control.PluginID, Action: control.Action, OK: controlErr == nil}
+	if controlErr != nil {
+		result.Error = controlErr.Error()
+	}
+	body, err := json.Marshal(result)
+	if err != nil {
+		return errors.Join(controlErr, fmt.Errorf("编码插件控制结果: %w", err))
+	}
+	_, ackErr := b.client.AckTask(b.callContext(ctx), &pb.AckTaskRequest{
+		JobId: task.JobId, LeaseToken: task.LeaseToken, ResultRef: string(body),
+	})
+	if ackErr != nil {
+		ackErr = fmt.Errorf("确认插件控制任务: %w", ackErr)
+	}
+	return errors.Join(controlErr, ackErr)
 }
 
 func (b *bot) fetchPayload(ctx context.Context, ref string) ([]byte, error) {
