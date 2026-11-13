@@ -4,33 +4,40 @@ AI 助手（含 Codex / Copilot / Claude 等）在本仓库内工作时，请遵
 
 ## 项目概述
 
-NexusCore 是以微内核为基础的个人智能工作台。内核只负责持久化事件与任务队列、Bot 注册与运行时（含配置中心）、跨设备传输路由三类原语；所有具体业务以插件形式接入。记忆与知识能力（四象限记忆、个人金库、知识图谱、版本晋升、上下文装配）完整属于 knowledge 类插件 `plugin_memory`——**内核与内核侧四角色（user_bot / create_bot / monitor_bot / security_bot）不感知、不持有、不装配任何记忆**。删除记忆插件，内核仍可作为队列与运行时底座独立运行。
+NexusCore 是以微内核为基础的个人智能工作台。系统结构解耦为三大板块：**Kernel**（微内核底座与原生单体记忆）、**GroupChatPlugin**（独立群聊插件）、**Frontend**（Vue 3 前端工作台）。
 
-- 语言：Go 1.26（hub / bot-runtime / agent-daemon / cli / migrate / plugin_memory 知识服务），Python（plugin_memory 内 memory-worker，M4 引入），TypeScript（workbench，M7 引入）
-- 数据库：PostgreSQL 16+，单 database `nexus`，schema 分离：`kernel`（hub 运行表 + 配置中心，hub 角色独占）、`memory` / `vault`（`plugin_memory` 自有，hub 无任何权限）；按运行 / 迁移 / 图谱 / 晋升 / 金库角色拆分最小权限
-- 总线：只有 bot 能投递与消费消息；用户以 `user_bot` 身份入总线；插件（含 `plugin_memory`）经其注册 bot 的**单次投递委托**回投
-- 配置：配置中心是 hub 模块（非第四原语）；`plugin / bot / agent / global` 四类配置，写入必须经 `user_bot` 批准；**MCP / Skill 不纳入配置中心**
+- **Kernel（微内核）**：负责持久化事件与任务队列、Bot 注册与运行时（supervisor）、跨设备传输路由三类原语；同时作为通用底座**内置 Bot 原生单体记忆功能**（基于 Claude Code 四层栈：Transcripts / Memory Notes / Memory Representations / Injected Context，严格限制 `MEMORY.md` ≤ 200 行，以 Auto Dream 离线整合削峰填谷；高缓存命中、零二次方膨胀）。
+- **Bot 定位（简单 Agent）**：每一个 Bot 都是一个**简单 Agent**，只能使用系统提供的各种功能与工具，**禁止长时间思考，禁止直接执行 Shell**（所有环境与物理操作统一经 Hub 传输路由反向 TCP 调度到目标 `agent-daemon` 执行）。Bot 的人格、系统提示词、画像与单体记忆采用**重启策略（Restart Policy）**生效，暂不考虑配置中心运行时动态热重载。
+- **GroupChatPlugin（群聊插件）**：独立目录与独立开发，实现多 Bot 群聊会话流。**会话严格由“仅仅用户@触发”**，禁止 Bot 间自发级联互 @ 唤醒，杜绝死循环与发散 Token 膨胀。
+- **Frontend（前端工作台）**：基于 Vue 3 + Vite 搭建在 `Frontend/` 目录下，提供多 Bot 群聊窗口、@Mention 交互、Bot 画像/记忆可视化管理（一键保存重启）以及 Agent 探针执行可视化监控。
+- 语言：Go 1.26（Kernel / bot-runtime / agent-daemon / cli / migrate / GroupChatPlugin），TypeScript + Vue 3（Frontend）
+- 数据库：PostgreSQL 16+，单 database `nexus`，schema 分离：`kernel`（运行表 + 配置中心，hub 角色独占）
+- 总线：只有 bot 能投递与消费消息；用户以 `user_bot` 身份入总线；插件经其注册 bot 的**单次投递委托**回投
+- 配置：配置中心是 hub 模块；`plugin / bot / agent / global` 四类配置，写入经 `user_bot` 批准；Bot 级配置修改通过重启生效；**MCP / Skill 不纳入配置中心**
 
 ## 目录结构
 
 ```
-hub/                # Go 微内核网关（队列/事件、注册与 ACL、config、ingress、scheduler、outbox、transport、supervisor）
-bot-runtime/        # Bot 独立二进制运行时（lazy / resident 双类型）
-agent-daemon/       # 跨设备探针（M5；M1 内置 loopback 模式做测试夹具）
-cli/                # 用户(user_bot)的投递与管理代理
-cmd/migrate/        # 内核库迁移 CLI
-internal/           # 跨二进制共享内部包
-  ├─ version/       # 统一版本号
-  └─ migrate/       # 迁移库（不依赖 golang-migrate）
-plugins/
-  └─ plugin_memory/ # 记忆插件：知识服务骨架（M3 填充实现）+ manifest + memory_bot（M3）
-migrations/
-  ├─ kernel/        # 内核运行表 DDL（M1 填充）
-  └─ plugins/
-      └─ plugin_memory/{memory,vault}/  # 插件自有 DDL（M3 填充，M2 审查流程）
-proto/              # gRPC proto 契约
-doc/                # 设计文档（见下）
-  └─ ConfigCenter/  # 配置中心实现级详设（D-23）
+Kernel/                 # 微内核底座与核心运行时
+  ├─ hub/               # Go 微内核网关（队列/事件、注册与 ACL、config、ingress、scheduler、outbox、transport、supervisor）
+  ├─ memory/            # Bot 原生单体记忆系统（Claude Code 四层栈：Transcripts / Notes / Representations / MEMORY.md ≤200行 / Auto Dream）
+  ├─ bot-runtime/       # Bot 独立运行时（简单 Agent 实现：禁Shell、禁长思考、读单体记忆、操控 Agent）
+  ├─ agent-daemon/      # 跨设备物理探针（受控工具执行器）
+  ├─ cli/               # 用户(user_bot)的投递与管理代理
+  ├─ cmd/migrate/       # 内核库迁移 CLI
+  ├─ internal/          # 跨二进制共享内部包（osproc / envelope / version / migrate）
+  ├─ migrations/        # 内核与内置表 DDL
+  └─ proto/             # gRPC proto 契约
+GroupChatPlugin/        # 独立群聊插件工程（独立开发）
+  ├─ main.go            # 群聊独立服务二进制
+  ├─ manifest.json      # 标准插件清单与能力声明
+  ├─ room/              # 群聊房间与上下文管理
+  └─ mention/           # @ 语法提取器（仅用户@触发路由）
+Frontend/               # 独立前端工程（Vue 3 + Vite）
+  ├─ src/views/         # 群聊会话主视区、Bot画像编辑抽屉、Agent实时追踪面板
+  ├─ src/components/    # 聊天气泡、MentionInput、AgentActivityCard
+  └─ package.json
+doc/                    # 架构与实现设计文档
 ```
 
 ## 常用命令
@@ -139,12 +146,14 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 
 ## 当前状态
 
-| 里程碑 | 状态 |
-| --- | --- |
-| M0 工程骨架 | 已完成（`c657459`）；D-22 记忆插件化（`65f3901`）与 D-23 文档重构（PG + 配置中心）已落地 |
-| M1 内核 MVP（纯内核） | 已完成（详设第 8 节六条验收全过；实现偏离与验收证据见详设 §10） |
-| M2 Bot 管理与插件运营 | 已完成（PostgreSQL 16+ docker-compose、配置中心完整审批流、Bot 管理、两级进程生命周期、DLQ 与 Health 全部验收通过，详见 `scripts/smoke-m2.sh`） |
-| M3+ | 未开始（记忆插件 v1 在 M3；MCP / Skill 不在任何里程碑内） |
+| 里程碑 | 状态 | 说明 |
+| --- | --- | --- |
+| M0 工程骨架 | 已完成（`c657459`） | D-22 插件化与 D-23 文档重构已落地 |
+| M1 内核 MVP（纯内核） | 已完成 | 详设第 8 节六条验收全过；实现偏离与验收证据见详设 §10 |
+| M2 Bot 管理与插件运营 | 已完成 | PostgreSQL 16+ docker-compose、配置中心完整审批流、Bot 管理、两级进程生命周期、DLQ 与 Health 全部验收通过（`d569a80`） |
+| M3 群聊底座与单体记忆 | 规划中（当前主线） | 完善插件安装规范；内置 Claude Code 式单体记忆栈（≤200行）；独立开发 `GroupChatPlugin`；简单 Agent 操控 Agent 闭环 |
+| M4 Vue 工作台与实机演示 | 规划中 | `Frontend/` Vue 3 前端工程搭建；多 Bot 群聊交互与状态流式展示；多 Bot 操控 Agent 完整实机演练 |
+| M5+ 跨设备 Mesh 与多模态 | 规划中 | 真实设备 Agent 探针、更多外部通道 |
 
 ## 常见禁忌（先问用户再做）
 

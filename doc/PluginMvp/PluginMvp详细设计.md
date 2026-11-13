@@ -75,6 +75,28 @@ plugin_manifest
 - 初始配置（v1）由 install 流程生成：`plugin install` 是 user_bot 发起的指令，安装时的配置随 `security-approve` 与安装动作一并批准并激活（install 流程内部以 user_bot 身份调用 `ConfigControl.Approve`，绑定 checksum，`approved_by=user_bot`）；后续任何变更必须走 `config propose → (security review) → user_bot approve → activate`。
 - 配置文档不复制 manifest 字段；需要引用时用 `manifest_version + binary_digest`。
 
+### 3.2 独立插件目录与打包标准规范（以 GroupChatPlugin 为例）
+
+为支持外部业务插件实现“独立目录开发、开箱即装、隔离运行”，明确独立插件的标准目录结构与分发规范：
+
+```text
+GroupChatPlugin/                 # 插件根目录（独立开发、独立编译）
+├── manifest.json                # 插件清单（声明 plugin_id, binary, tools, templates 等）
+├── main.go                      # 插件 L2 独立进程入口
+├── bin/                         # 编译产物目录（如 bin/groupchat_plugin）
+├── migrations/                  # 插件自有数据表 DDL（按需）
+│   ├── 0001_chat_rooms.up.sql
+│   └── 0001_chat_rooms.down.sql
+├── config_schema.json           # 插件自身运行配置的 JSON Schema
+└── README.md                    # 插件能力与协议说明文档
+```
+
+**安装与校验前置要求**：
+1. **源码或二进制就绪**：插件安装前，独立进程制品必须已被编译至指定路径，并通过 `sha256sum` 计算填入 `manifest.json` 的 `binary_digest`；
+2. **所有权声明**：`bot_templates[0]` 声明为该插件的 `owner_bot`，作为唯一合法持有并管理插件进程的 Bot；
+3. **安全审查通过**：`security_bot` 审查其二进制摘要、声明的发布/订阅事件与依赖工具，禁止声明内核保留前缀（`bot.* / kernel.*` 等）；
+4. **用户批准后激活**：在交互终端由 `user_bot` 批准后，自动写入 `kernel_plugins`、登记事件与工具权限，并由 supervisor 拉起 owner bot 驱动 L2 插件进程自治启动。
+
 ## 4. 命名与事件规范（G1 收口）
 
 ### 4.1 bot_id 命名

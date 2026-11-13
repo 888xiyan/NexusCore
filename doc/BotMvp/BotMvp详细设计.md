@@ -9,25 +9,34 @@
 
 ### 1.1 目标
 
-1. 内核启动即预置 `user_bot / monitor_bot / security_bot` 三个 resident 进程与一个懒加载的 `create_bot` worker，均通过 bot-runtime 独立二进制承载（D-17 / D-18 保持）；四角色不持有、不读取任何记忆，其能力不依赖记忆插件是否安装。四角色在配置中心的职责见 §4 与 ConfigCenter 详设。
-2. `create_bot` 读配置中心的 active 投影（Bot / 插件 / Agent），按需触发 supervisor 拉起业务 Bot 进程（决策与执行分离，D-20）；**插件进程**不由 create_bot / supervisor 常规拉起，而由该插件的 owner bot 拉起（PluginMvp §6）。
-3. `monitor_bot` 周期扫描 `bot_instances / kernel_jobs / kernel_plugin_processes`：进程消失、心跳超时、租约过期、Consumer Group 位点停滞、插件进程失联、配置版本漂移六类异常走 6.9 Health 链路与事件总线。
-4. `security_bot` 承担插件注册 / 注册 Bot 审查 / 热更新治理 / **配置提案安全预审**四件事，MVP 通过 CLI 审批（`security-approve / security-list / security-revoke`）；配置批准权属于 `user_bot`，security_bot 只给意见。
-5. 插件清单最少须声明一个 `xxx_bot`（业务 Bot），用户通过插件 / CLI 注册的 Bot 前缀 `user_`。保留名禁用（3.3.1 规则 2）。
-6. 四角色与插件侧 Bot 共用同一份 `BotRuntime` gRPC 控制面与 bot-runtime 二进制，仅 manifest 不同。
-7. 插件进程关闭双路径：优雅路径 `user_bot → owner bot → 插件进程`；强制路径 `user_bot → create_bot → supervisor` 越过 owner bot（§8.6 / §8.7）。
-8. 冒烟链路端到端可验收（见第 8 节）。
+1. **Bot 核心定位：简单 Agent（Simple Agent）**：
+   - 每一个 Bot 是一个基于统一运行时（`bot-runtime`）运行的轻量独立进程；
+   - **只能使用系统提供的功能与工具**：Bot 接收上下文后，通过规范的 Tool Call 协议调用系统或插件暴露的能力（如查询、操作设备、调用 Agent）；
+   - **禁止长时间思考**：单次推理与决策设置严格超时硬封顶（10~15 秒），禁止深度递归 CoT 循环与发散自主搜索；
+   - **禁止直接执行 Shell**：Bot 自身运行在受限环境，源码中不提供直接执行任意宿主命令的接口；所有物理环境与操作系统命令统一经由 Hub 传输路由（Transport Router 反向 TCP）调度到目标受控的 `agent-daemon` 执行。
+2. **Bot 单体记忆系统（默认内置 Kernel/）**：
+   - 参考 Claude Code 四层文件系统记忆栈规范（Transcripts 原始日志层、Memory Notes 离散笔记层、Memory Representations 结构化表征层、Injected Context 常驻注入层）；
+   - **严格限制 `MEMORY.md` 注入切片在 200 行以内**（约 500~2000 Tokens），极大提升 Prompt Cache 命中率（85%~93%），彻底打破长会话的 Token 二次方复合膨胀；
+   - Kernel 异步四阶段 Auto Dream 离线整合；
+   - **配置与记忆采用“重启策略（Restart Policy）”**：Bot 的人格、系统提示词、画像与单体记忆修改直接通过重启 Bot 实例生效，暂不考虑复杂的配置中心运行时动态热重载。
+3. **群聊会话触发边界**：
+   - 在多 Bot 群聊场景中，**严格收敛为“仅仅用户@触发”**；Bot 输出文本中的 @ 仅作为展示，禁止 Bot 间自发级联互 @ 唤醒，杜绝死循环与发散 Token 膨胀。
+4. 内核启动即预置 `user_bot / monitor_bot / security_bot` 三个 resident 进程与一个懒加载的 `create_bot` worker，均通过 bot-runtime 独立二进制承载（D-17 / D-18 保持）。
+5. `create_bot` 读配置中心的 active 投影（Bot / 插件 / Agent），按需触发 supervisor 拉起业务 Bot 进程（决策与执行分离，D-20）；**插件进程**不由 create_bot / supervisor 常规拉起，而由该插件的 owner bot 拉起（PluginMvp §6）。
+6. `monitor_bot` 周期扫描 `bot_instances / kernel_jobs / kernel_plugin_processes`：进程消失、心跳超时、租约过期、Consumer Group 位点停滞、插件进程失联、配置版本漂移六类异常走 6.9 Health 链路与事件总线。
+7. `security_bot` 承担插件注册 / 注册 Bot 审查 / 热更新治理 / **配置提案安全预审**四件事，MVP 通过 CLI 审批（`security-approve / security-list / security-revoke`）；配置批准权属于 `user_bot`，security_bot 只给意见。
+8. 插件进程关闭双路径：优雅路径 `user_bot → owner bot → 插件进程`；强制路径 `user_bot → create_bot → supervisor` 越过 owner bot（§8.6 / §8.7）。
+9. 冒烟链路端到端可验收（见第 8 节）。
 
 ### 1.2 非目标（明确延后）
 
 | 延后项 | 触发条件 |
 | --- | --- |
+| Bot 运行时动态热更新（drain + reload） | 暂不考虑，先采用毫秒级“重启策略” |
+| Bot 自发相互 @ 串联与自主复杂递归协作 | 存在死循环风险，严格限制为“仅仅用户@触发” |
 | Bot 二进制自动拉取 / 签名校验自动化 | CI 有制品签名后（先用 `binary_digest` 手工对账） |
 | 插件市场 / 远程安装 | 用户需要在线安装插件时 |
 | `monitor_bot` 健康评分、告警策略、自动熔断 | 真实负载产生评分信号后 |
-| Bot 角色间消息（role-to-role RPC） | 跨 role 有协作需求时 |
-| Tauri 工作台 UI | M7 |
-| 插件热更新 UI 入口 | CLI 已可运行（走 `security-review` + `create-bot-pull`） |
 
 ## 2. 角色清单与部署形态
 
@@ -153,7 +162,7 @@ user_bot (resident) 收到 CLI `plugin install xxx` / `bot create xxx_user` 指�
 1. 命名必须 `user_` 前缀；若宿插件给出模板，默认名从模板生成（可改尾缀）。
 2. `managed_by=plugin_id`，`owner=user_bot`。
 3. 用户 / 插件指令驱动的安全审查流程与 4.4 相同。
-4. 创建时默认写入 `memory_profile=personal_stack_v1`（内核只存储声明、不解释其含义）；宿插件负责提供创建入口和业务工具，不实现记忆引擎。该 profile 的运行时由记忆插件 `plugin_memory` 内的 memory-worker 于 M4 承载，详见[用户级Bot默认个人记忆架构](../MemoryPlugin/用户级Bot默认个人记忆架构.md)。内核侧四角色不使用任何 memory_profile。
+4. 创建时默认写入 `memory_profile=personal_stack_v1`。由 Kernel 原生单体记忆栈（基于 Claude Code 四层栈：Transcripts / Notes / Representations / MEMORY.md ≤ 200行）承载，提供长效经验记忆，零二次方膨胀；配置与记忆修改通过 supervisor 重启生效。内核侧四角色不使用任何 memory_profile。
 5. `user_xxx_bot` **不是 owner bot**：不 exec 插件进程，经本地 IPC 复用宿插件那一个插件进程；宿插件进程未运行时按 lazy 语义先唤醒 owner bot（PluginMvp §6.1 规则 2）。
 
 ## 6. 数据模型
