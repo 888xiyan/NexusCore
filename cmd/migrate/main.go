@@ -7,6 +7,7 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strconv"
 
 	"github.com/888xiyan/NexusCore/internal/migrate"
@@ -37,7 +38,7 @@ func main() {
 		}
 		return out, nil
 	}
-	readFile := func(name string) ([]byte, error) { return os.ReadFile(*dir + "/" + name) }
+	readFile := func(name string) ([]byte, error) { return os.ReadFile(filepath.Join(*dir, name)) }
 
 	ctx := context.Background()
 	db, err := sql.Open("pgx", *dsn)

@@ -66,3 +66,32 @@ func TestListRejectsBadName(t *testing.T) {
 		t.Fatal("不合法文件名应报错")
 	}
 }
+
+func TestListRejectsConflictDifferentName(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "0001_first.up.sql")
+	write(t, dir, "0001_first.down.sql")
+	write(t, dir, "0001_conflict.up.sql")
+	write(t, dir, "0001_conflict.down.sql")
+	_, err := List(dir, lister(dir))
+	if err == nil {
+		t.Fatal("同一版本号存在不同描述时应报错")
+	}
+	if !strings.Contains(err.Error(), "迁移版本冲突") {
+		t.Fatalf("错误信息应指明版本冲突: %v", err)
+	}
+}
+
+func TestListRejectsDuplicateScript(t *testing.T) {
+	dir := t.TempDir()
+	write(t, dir, "0001_first.up.sql")
+	write(t, dir, "0001_first.down.sql")
+	names := []string{"0001_first.up.sql", "0001_first.down.sql", "1_first.up.sql"}
+	_, err := List(dir, func(string) ([]string, error) { return names, nil })
+	if err == nil {
+		t.Fatal("同一版本重复声明 up 脚本时应报错")
+	}
+	if !strings.Contains(err.Error(), "冲突") {
+		t.Fatalf("错误信息应指明冲突: %v", err)
+	}
+}

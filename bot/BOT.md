@@ -58,6 +58,7 @@ bot/
 | 2026-11-12 11:43 | qoder | 通读整个项目（设计文档 + 代码骨架 + bot/ 协议） | 全仓库只读核查 + 记忆登记 | done | Bots.md §5/§6 更新 |
 | 2026-11-12 12:10 | qoder | 插件进程两级模型细节优化（启动 / 优雅关闭 / 强制 kill） | `doc/PluginMvp/`、`doc/BotMvp/`、架构总结、内核 MVP、MemoryPlugin、AGENTS.md、开发规划、两份 README | done | 10 文件已改，build/vet/test 全绿；已随 2026-11-13 M1 提交入库 |
 | 2026-11-13 | qoder | M1 纯内核 MVP 实现 + 验收 + 文档回写 | `migrations/kernel/`、`hub/`（10 模块 + httpapi）、`internal/{envelope,pgtest}`、`bot-runtime/`、`agent-daemon/`、`cli/`、`scripts/`、详设 §10、D-04 归档 | done | commit `3a0e2a6`（79 文件）；详设第 8 节六条全过，真库 test/vet/smoke-m1/drill-crash-m1 全绿 |
+| 2026-11-13 16:50 | antigravity | 修复 M0 审计发现的问题（Makefile 子shell、迁移冲突检测、空指针panic、事务原子性） | `Makefile`、`internal/migrate/`、`cmd/migrate/` | done | M0 审计闭环，单测+构建全绿 |
 
 ## 5. 记忆写入规范
 

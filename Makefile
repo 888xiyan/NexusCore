@@ -52,15 +52,25 @@ proto:
 migrate-probe:
 	@if [ -z "$$NEXUS_PG_KERNEL_DSN" ]; then \
 		echo "未设置 NEXUS_PG_KERNEL_DSN：M0 允许跳过；真正的探活在配置 PostgreSQL 后执行"; \
-		exit 0; \
+	else \
+		go run ./cmd/migrate -cmd probe -dsn "$${NEXUS_PG_MIGRATE_DSN:-$$NEXUS_PG_KERNEL_DSN}" -dir migrations/kernel; \
 	fi
-	@go run ./cmd/migrate -cmd probe -dsn "$${NEXUS_PG_MIGRATE_DSN:-$$NEXUS_PG_KERNEL_DSN}" -dir migrations/kernel
 
 migrate-up:
-	@test -n "$$NEXUS_PG_KERNEL_DSN" && go run ./cmd/migrate -cmd up -dsn "$${NEXUS_PG_MIGRATE_DSN:-$$NEXUS_PG_KERNEL_DSN}" -dir migrations/kernel
+	@if [ -z "$$NEXUS_PG_KERNEL_DSN" ]; then \
+		echo "未设置 NEXUS_PG_KERNEL_DSN：请先配置数据库连接"; \
+		exit 1; \
+	else \
+		go run ./cmd/migrate -cmd up -dsn "$${NEXUS_PG_MIGRATE_DSN:-$$NEXUS_PG_KERNEL_DSN}" -dir migrations/kernel; \
+	fi
 
 migrate-down:
-	@test -n "$$NEXUS_PG_KERNEL_DSN" && go run ./cmd/migrate -cmd down -dsn "$${NEXUS_PG_MIGRATE_DSN:-$$NEXUS_PG_KERNEL_DSN}" -dir migrations/kernel
+	@if [ -z "$$NEXUS_PG_KERNEL_DSN" ]; then \
+		echo "未设置 NEXUS_PG_KERNEL_DSN：请先配置数据库连接"; \
+		exit 1; \
+	else \
+		go run ./cmd/migrate -cmd down -dsn "$${NEXUS_PG_MIGRATE_DSN:-$$NEXUS_PG_KERNEL_DSN}" -dir migrations/kernel; \
+	fi
 
 smoke-empty: migrate-probe
 	@echo "smoke-empty ok（无库环境为跳过模式）"

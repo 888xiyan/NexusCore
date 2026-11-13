@@ -50,11 +50,19 @@ func List(dir string, list func(dir string) ([]string, error)) ([]Item, error) {
 		if !ok {
 			it = &Item{Version: v, Name: mo[2]}
 			m[v] = it
+		} else if it.Name != mo[2] {
+			return nil, fmt.Errorf("迁移版本冲突：%04d 同时存在描述 %q 与 %q", v, it.Name, mo[2])
 		}
 		switch mo[3] {
 		case "up":
+			if it.UpPath != "" {
+				return nil, fmt.Errorf("迁移版本冲突：%04d 重复声明 up 脚本（%q 与 %q）", v, it.UpPath, name)
+			}
 			it.UpPath = name
 		case "down":
+			if it.DownPath != "" {
+				return nil, fmt.Errorf("迁移版本冲突：%04d 重复声明 down 脚本（%q 与 %q）", v, it.DownPath, name)
+			}
 			it.DownPath = name
 		}
 	}
@@ -114,22 +122,42 @@ func Run(ctx context.Context, db *sql.DB, items []Item, up bool, read func(path 
 		for rows.Next() {
 			var v int
 			if err := rows.Scan(&v); err != nil {
-				return err
+				return fmt.Errorf("读取迁移记录: %w", err)
 			}
 			applied[v] = true
+		}
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("遍历迁移记录: %w", err)
 		}
 	} else if up {
 		return fmt.Errorf("查询迁移记录: %w", err)
 	}
-	_ = rows.Err()
 
-	exec := func(path string) error {
+	execTx := func(path string, isUp bool, version int, name string) error {
 		body, err := read(path)
 		if err != nil {
 			return fmt.Errorf("读取 %s: %w", path, err)
 		}
-		if _, err := db.ExecContext(ctx, string(body)); err != nil {
+		tx, err := db.BeginTx(ctx, nil)
+		if err != nil {
+			return fmt.Errorf("开启迁移事务 %04d_%s: %w", version, name, err)
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		if _, err := tx.ExecContext(ctx, string(body)); err != nil {
 			return fmt.Errorf("执行 %s: %w", path, err)
+		}
+		if isUp {
+			if _, err := tx.ExecContext(ctx, "INSERT INTO _migrations (version, name) VALUES ($1, $2)", version, name); err != nil {
+				return fmt.Errorf("记录迁移 %04d: %w", version, err)
+			}
+		} else {
+			if _, err := tx.ExecContext(ctx, "DELETE FROM _migrations WHERE version = $1", version); err != nil {
+				return fmt.Errorf("移除记录 %04d: %w", version, err)
+			}
+		}
+		if err := tx.Commit(); err != nil {
+			return fmt.Errorf("提交迁移事务 %04d_%s: %w", version, name, err)
 		}
 		return nil
 	}
@@ -139,12 +167,8 @@ func Run(ctx context.Context, db *sql.DB, items []Item, up bool, read func(path 
 			if applied[it.Version] || (to != nil && it.Version > *to) {
 				continue
 			}
-			if err := exec(it.UpPath); err != nil {
+			if err := execTx(it.UpPath, true, it.Version, it.Name); err != nil {
 				return err
-			}
-			_, err := db.ExecContext(ctx, "INSERT INTO _migrations (version, name) VALUES ($1, $2)", it.Version, it.Name)
-			if err != nil {
-				return fmt.Errorf("记录迁移 %04d: %w", it.Version, err)
 			}
 			fmt.Printf("up   %04d_%s\n", it.Version, it.Name)
 		}
@@ -156,11 +180,8 @@ func Run(ctx context.Context, db *sql.DB, items []Item, up bool, read func(path 
 		if !applied[it.Version] || (to != nil && it.Version <= *to) {
 			continue
 		}
-		if err := exec(it.DownPath); err != nil {
+		if err := execTx(it.DownPath, false, it.Version, it.Name); err != nil {
 			return err
-		}
-		if _, err := db.ExecContext(ctx, "DELETE FROM _migrations WHERE version = $1", it.Version); err != nil {
-			return fmt.Errorf("移除记录 %04d: %w", it.Version, err)
 		}
 		fmt.Printf("down %04d_%s\n", it.Version, it.Name)
 	}
