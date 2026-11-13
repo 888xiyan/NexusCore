@@ -190,6 +190,17 @@ func (s *Scheduler) Enqueue(ctx context.Context, req EnqueueRequest) (*Job, erro
 	return job, nil
 }
 
+func enqueueArgs(req EnqueueRequest) []any {
+	return []any{
+		req.QueueName, req.JobType, nullable(req.EnvelopeID), nullable(req.BotID),
+		nullable(req.ProjectID), nullable(req.PartitionKey), req.CorrelationID,
+		nullable(req.CausationID), req.RootEnvelopeID, nullableJSON(req.CausalPath),
+		nullable(req.Traceparent), nullable(req.IdempotencyKey), req.ParentJobID,
+		req.Priority, nullable(req.PayloadHash), nullable(req.PayloadRef),
+		nullableJSON(req.PayloadJSON), req.ConfigVersion,
+	}
+}
+
 // EnqueueTx 在调用方已有事务内入队，供 Outbox 等需要与业务状态同事务提交的场景使用。
 func (s *Scheduler) EnqueueTx(ctx context.Context, tx pgx.Tx, req EnqueueRequest) (*Job, error) {
 	if req.QueueName == "" || req.JobType == "" {
@@ -205,13 +216,7 @@ func (s *Scheduler) EnqueueTx(ctx context.Context, tx pgx.Tx, req EnqueueRequest
 		   correlation_id, causation_id, root_envelope_id, causal_path_json, traceparent,
 		   idempotency_key, parent_job_id, priority, payload_hash, payload_ref, payload_json, config_version)
 		VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15,$16,$17::jsonb,$18)
-		RETURNING job_id`,
-		req.QueueName, req.JobType, nullable(req.EnvelopeID), nullable(req.BotID),
-		nullable(req.ProjectID), nullable(req.PartitionKey), req.CorrelationID,
-		nullable(req.CausationID), req.RootEnvelopeID, nullableJSON(req.CausalPath),
-		nullable(req.Traceparent), nullable(req.IdempotencyKey), req.ParentJobID,
-		req.Priority, nullable(req.PayloadHash), nullable(req.PayloadRef),
-		nullableJSON(req.PayloadJSON), req.ConfigVersion).Scan(&id)
+		RETURNING job_id`, enqueueArgs(req)...).Scan(&id)
 	if err != nil {
 		var pgErr interface{ SQLState() string }
 		if errors.As(err, &pgErr) && pgErr.SQLState() == "23505" {
@@ -246,13 +251,7 @@ func (s *Scheduler) EnqueueTxIfAbsent(ctx context.Context, tx pgx.Tx, req Enqueu
 		   idempotency_key, parent_job_id, priority, payload_hash, payload_ref, payload_json, config_version)
 		VALUES ($1,$2,'queued',$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,$15,$16,$17::jsonb,$18)
 		ON CONFLICT (idempotency_key) DO NOTHING
-		RETURNING job_id`,
-		req.QueueName, req.JobType, nullable(req.EnvelopeID), nullable(req.BotID),
-		nullable(req.ProjectID), nullable(req.PartitionKey), req.CorrelationID,
-		nullable(req.CausationID), req.RootEnvelopeID, nullableJSON(req.CausalPath),
-		nullable(req.Traceparent), req.IdempotencyKey, req.ParentJobID,
-		req.Priority, nullable(req.PayloadHash), nullable(req.PayloadRef),
-		nullableJSON(req.PayloadJSON), req.ConfigVersion).Scan(&id)
+		RETURNING job_id`, enqueueArgs(req)...).Scan(&id)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil // 已存在，跳过
 	}
@@ -363,10 +362,10 @@ func (s *Scheduler) Lease(ctx context.Context, queueName, workerID string, confi
 			tag, err := tx.Exec(ctx, `
 				UPDATE kernel_jobs
 				   SET status='leasing', lease_owner=$2, lease_token=$3,
-				       lease_until=now() + ($4 || ' seconds')::interval,
+				       lease_until=now() + make_interval(secs => $4),
 				       config_version=COALESCE($5, config_version), updated_at=now()
 				 WHERE job_id=$1 AND status IN ('queued','retry_backoff')`,
-				c.id, workerID, token, fmt.Sprintf("%d", int(s.leaseTTL.Seconds())), configVersion)
+				c.id, workerID, token, int(s.leaseTTL.Seconds()), configVersion)
 			if err != nil {
 				return fmt.Errorf("认领任务: %w", err)
 			}
@@ -384,14 +383,16 @@ func (s *Scheduler) Lease(ctx context.Context, queueName, workerID string, confi
 	return leased, nil // nil 表示本轮无可认领任务
 }
 
-// RenewLease 续租：令牌必须一致，且租约尚未过期。
+// RenewLease 续租：令牌必须一致，且租约尚未过期（时钟以数据库 now() 为准）。
 func (s *Scheduler) RenewLease(ctx context.Context, jobID int64, leaseToken string) error {
 	return s.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		var status string
-		var until *time.Time
+		var notExpired bool
 		var token string
-		err := tx.QueryRow(ctx, `SELECT status, lease_until, COALESCE(lease_token,'') FROM kernel_jobs WHERE job_id=$1 FOR UPDATE`, jobID).
-			Scan(&status, &until, &token)
+		err := tx.QueryRow(ctx, `
+			SELECT status, (lease_until IS NOT NULL AND lease_until > now()), COALESCE(lease_token,'')
+			  FROM kernel_jobs WHERE job_id=$1 FOR UPDATE`, jobID).
+			Scan(&status, &notExpired, &token)
 		if errors.Is(err, pgx.ErrNoRows) {
 			return ErrNotFound
 		}
@@ -404,12 +405,12 @@ func (s *Scheduler) RenewLease(ctx context.Context, jobID int64, leaseToken stri
 		if status != StatusLeasing && status != StatusRunning {
 			return fmt.Errorf("%w: 状态 %s 不可续租", ErrBadTransition, status)
 		}
-		if until == nil || !until.After(time.Now()) {
+		if !notExpired {
 			return fmt.Errorf("%w: job %d", ErrLeaseExpired, jobID)
 		}
 		_, err = tx.Exec(ctx, `
-			UPDATE kernel_jobs SET lease_until=now() + ($2 || ' seconds')::interval, updated_at=now()
-			 WHERE job_id=$1`, jobID, fmt.Sprintf("%d", int(s.leaseTTL.Seconds())))
+			UPDATE kernel_jobs SET lease_until=now() + make_interval(secs => $2), updated_at=now()
+			 WHERE job_id=$1`, jobID, int(s.leaseTTL.Seconds()))
 		if err != nil {
 			return fmt.Errorf("续租失败: %w", err)
 		}
@@ -463,8 +464,8 @@ func (s *Scheduler) Fail(ctx context.Context, jobID int64, leaseToken, reason st
 		}
 		_, err := tx.Exec(ctx, `
 			UPDATE kernel_jobs SET status='retry_backoff', attempt_count=$2, lease_token=NULL, lease_owner=NULL,
-			       lease_until=NULL, next_retry_at=now() + ($3 || ' seconds')::interval, updated_at=now()
-			 WHERE job_id=$1`, jobID, next, fmt.Sprintf("%d", int(s.retryBackoff.Seconds())))
+			       lease_until=NULL, next_retry_at=now() + make_interval(secs => $3), updated_at=now()
+			 WHERE job_id=$1`, jobID, next, int(s.retryBackoff.Seconds()))
 		if err != nil {
 			return fmt.Errorf("标记重试: %w", err)
 		}
@@ -491,8 +492,30 @@ func (s *Scheduler) Suspend(ctx context.Context, jobID int64, reason string) err
 	})
 }
 
+// Release 将正在 leasing 的任务归还队列（清空租约，恢复 queued 状态）。
+// 适用场景：worker 认领到不属于当前处理流的任务类型（例如事件流拉到普通任务），立即主动释放供对应 worker 认领。
+func (s *Scheduler) Release(ctx context.Context, jobID int64, leaseToken string) error {
+	return s.withLease(ctx, jobID, leaseToken, func(ctx context.Context, tx pgx.Tx, j *Job) error {
+		if j.Status != StatusLeasing {
+			return fmt.Errorf("%w: 状态 %s 不可释放回队列", ErrBadTransition, j.Status)
+		}
+		_, err := tx.Exec(ctx, `
+			UPDATE kernel_jobs
+			   SET status='queued', lease_token=NULL, lease_owner=NULL, lease_until=NULL, updated_at=now()
+			 WHERE job_id=$1`, jobID)
+		if err != nil {
+			return fmt.Errorf("释放任务回队列: %w", err)
+		}
+		return store.NotifyTx(ctx, tx, wakeupChannel, j.QueueName)
+	})
+}
+
 func (s *Scheduler) withLease(ctx context.Context, jobID int64, leaseToken string, fn func(context.Context, pgx.Tx, *Job) error) error {
 	return s.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		var dbNow time.Time
+		if err := tx.QueryRow(ctx, `SELECT now()`).Scan(&dbNow); err != nil {
+			return fmt.Errorf("读取数据库时钟: %w", err)
+		}
 		j, err := scanJob(tx.QueryRow(ctx, `SELECT `+jobColumns+` FROM kernel_jobs WHERE job_id=$1 FOR UPDATE`, jobID))
 		if err != nil {
 			return err
@@ -505,7 +528,7 @@ func (s *Scheduler) withLease(ctx context.Context, jobID int64, leaseToken strin
 		if j.LeaseToken != leaseToken {
 			return fmt.Errorf("%w: job %d（防双 worker）", ErrLeaseMismatch, jobID)
 		}
-		if j.LeaseUntil == nil || !j.LeaseUntil.After(time.Now()) {
+		if j.LeaseUntil == nil || !j.LeaseUntil.After(dbNow) {
 			return fmt.Errorf("%w: job %d", ErrLeaseExpired, jobID)
 		}
 		return fn(ctx, tx, j)
@@ -577,42 +600,45 @@ func (s *Scheduler) hasExecutedIntents(ctx context.Context, q interface {
 // DetectExpiredLeases 是崩溃恢复与租约冲突的检测入口。
 // 已声明幂等（有 idempotency_key 且无已执行副作用）的任务自动重试；
 // 其余一律 suspended 等人工确认，绝不自动重放非幂等副作用。
+// 增加单批次上限（LIMIT 100）防单事务过大超时，单查询结合意图检查消除 N+1 查询。
 func (s *Scheduler) DetectExpiredLeases(ctx context.Context) (suspended, requeued int, err error) {
 	err = s.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		rows, err := tx.Query(ctx, `
-			SELECT job_id FROM kernel_jobs
+			SELECT job_id, COALESCE(idempotency_key,''),
+			       EXISTS(SELECT 1 FROM kernel_job_intents i WHERE i.job_id=kernel_jobs.job_id AND i.status='executed')
+			  FROM kernel_jobs
 			 WHERE status IN ('leasing','running') AND lease_until IS NOT NULL AND lease_until <= now()
+			 ORDER BY job_id
+			 LIMIT 100
 			 FOR UPDATE SKIP LOCKED`)
 		if err != nil {
 			return fmt.Errorf("扫描过期租约: %w", err)
 		}
-		var ids []int64
+		defer rows.Close()
+
+		type item struct {
+			id          int64
+			idempKey    string
+			hasExecuted bool
+		}
+		var items []item
 		for rows.Next() {
-			var id int64
-			if err := rows.Scan(&id); err != nil {
-				rows.Close()
+			var it item
+			if err := rows.Scan(&it.id, &it.idempKey, &it.hasExecuted); err != nil {
 				return fmt.Errorf("读取过期任务: %w", err)
 			}
-			ids = append(ids, id)
+			items = append(items, it)
 		}
-		rows.Close()
 		if err := rows.Err(); err != nil {
 			return err
 		}
-		for _, id := range ids {
-			j, err := getJob(ctx, tx, id)
-			if err != nil {
-				return err
-			}
-			executed, err := s.hasExecutedIntents(ctx, tx, id)
-			if err != nil {
-				return err
-			}
-			if j.IdempotencyKey != "" && !executed {
+
+		for _, it := range items {
+			if it.idempKey != "" && !it.hasExecuted {
 				if _, err := tx.Exec(ctx, `
 					UPDATE kernel_jobs SET status='retry_backoff', attempt_count=attempt_count+1,
 					       lease_token=NULL, lease_owner=NULL, lease_until=NULL,
-					       next_retry_at=now(), updated_at=now() WHERE job_id=$1`, id); err != nil {
+					       next_retry_at=now(), updated_at=now() WHERE job_id=$1`, it.id); err != nil {
 					return fmt.Errorf("幂等任务自动重试: %w", err)
 				}
 				requeued++
@@ -620,7 +646,7 @@ func (s *Scheduler) DetectExpiredLeases(ctx context.Context) (suspended, requeue
 			}
 			if _, err := tx.Exec(ctx, `
 				UPDATE kernel_jobs SET status='suspended', suspend_reason=$2, lease_until=NULL, updated_at=now()
-				 WHERE job_id=$1`, id, SuspendLeaseExpired); err != nil {
+				 WHERE job_id=$1`, it.id, SuspendLeaseExpired); err != nil {
 				return fmt.Errorf("挂起租约冲突任务: %w", err)
 			}
 			suspended++
@@ -734,30 +760,21 @@ func (s *Scheduler) ResumeConfirmed(ctx context.Context, jobID int64, decision, 
 	return out, nil
 }
 
-// Replay 是 DLQ 重放入口：必经人工确认，不提供自动去重或自动跳过。
+// Replay 是 DLQ 重放入口：必经人工确认，直接在单事务内行锁校验并生成新任务（消除 TOCTOU）。
 func (s *Scheduler) Replay(ctx context.Context, jobID int64, byUser string) (*Job, error) {
-	j, err := s.Get(ctx, jobID)
-	if err != nil {
-		return nil, err
-	}
-	if j.Status != StatusDead && j.Status != StatusSuspended {
-		return nil, fmt.Errorf("%w: 只有 dead / suspended 任务可 replay，当前 %s", ErrBadTransition, j.Status)
-	}
-	if j.Status == StatusDead {
-		if err := s.Suspend(ctx, jobID, SuspendReplayPending); err != nil {
-			return nil, err
-		}
-	}
 	return s.ResumeConfirmed(ctx, jobID, ResumeReplay, byUser)
 }
 
 // DeadLetter 把任务标记为死信（DLQ 语义标记，不物理删除）。
 func (s *Scheduler) DeadLetter(ctx context.Context, jobID int64, reason string) error {
-	_, err := s.st.Pool().Exec(ctx, `
+	tag, err := s.st.Pool().Exec(ctx, `
 		UPDATE kernel_jobs SET status='dead', suspend_reason=$2, lease_until=NULL, updated_at=now()
 		 WHERE job_id=$1 AND status NOT IN ('done','cancelled')`, jobID, reason)
 	if err != nil {
 		return fmt.Errorf("标记死信: %w", err)
+	}
+	if tag.RowsAffected() == 0 {
+		return fmt.Errorf("%w: job %d 当前状态不可标记死信", ErrBadTransition, jobID)
 	}
 	return nil
 }

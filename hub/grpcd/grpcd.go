@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"strconv"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"github.com/888xiyan/NexusCore/hub/store"
 	"github.com/888xiyan/NexusCore/internal/envelope"
 	pb "github.com/888xiyan/NexusCore/proto/gen/v1"
+	"github.com/jackc/pgx/v5"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/metadata"
@@ -94,11 +96,7 @@ func (s *Server) authenticate(ctx context.Context) (config.Actor, *envelope.Enve
 	if res.Decision == ingress.DecisionRejected {
 		return config.Actor{}, nil, status.Error(codes.Unauthenticated, res.Reason)
 	}
-	actor, _, err := s.reg.VerifyCredential(ctx, cred)
-	if err != nil {
-		return config.Actor{}, nil, status.Error(codes.Unauthenticated, err.Error())
-	}
-	return actor, env, nil
+	return res.Actor, env, nil
 }
 
 func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.RegisterResponse, error) {
@@ -147,7 +145,9 @@ func (s *Server) Heartbeat(ctx context.Context, req *pb.HeartbeatRequest) (*pb.H
 		if err != nil {
 			continue
 		}
-		_ = s.sched.RenewLease(ctx, jobID, token)
+		if err := s.sched.RenewLease(ctx, jobID, token); err != nil {
+			log.Printf("grpcd: renew lease failed for bot %s job %d: %v", req.BotId, jobID, err)
+		}
 	}
 	if s.sup != nil {
 		s.sup.MarkHeartbeat(req.BotId, req.ConfigVersion)
@@ -180,7 +180,7 @@ func (s *Server) StreamTasks(req *pb.StreamTasksRequest, stream pb.BotRuntime_St
 		queue = actor.ID
 	}
 	var configVersion *int64
-	_ = s.st.Pool().QueryRow(ctx, `SELECT config_version FROM bots WHERE bot_id=$1`, actor.ID).Scan(&configVersion)
+	_ = s.st.Pool().QueryRow(ctx, `SELECT config_version FROM bot_manifest WHERE bot_id=$1`, actor.ID).Scan(&configVersion)
 
 	ticker := time.NewTicker(s.poll)
 	defer ticker.Stop()
@@ -282,8 +282,10 @@ func (s *Server) SubscribeEvents(req *pb.SubscribeRequest, stream pb.BotRuntime_
 			continue
 		}
 		if job.JobType != scheduler.JobTypeEventDeliver {
-			// 非事件投递任务不属于本流，放回队列
-			_ = s.sched.Cancel(ctx, job.JobID)
+			// 非事件投递任务不属于本流，放回队列供对应任务流认领
+			if err := s.sched.Release(ctx, job.JobID, job.LeaseToken); err != nil {
+				log.Printf("grpcd: release non-event job %d failed: %v", job.JobID, err)
+			}
 			continue
 		}
 		var payload struct {
@@ -366,12 +368,17 @@ func (s *Server) Deregister(ctx context.Context, req *pb.DeregisterRequest) (*pb
 	if actor.ID != req.BotId {
 		return nil, status.Error(codes.PermissionDenied, "凭证主体与 bot_id 不一致")
 	}
-	_, err = s.st.Pool().Exec(ctx, `
-		UPDATE bot_instances SET observed_state='stopped', stopped_at=now()
-		 WHERE bot_id=$1 AND stopped_at IS NULL`, req.BotId)
+	err = s.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
+		if _, err := tx.Exec(ctx, `
+			UPDATE bot_instances SET observed_state='stopped', stopped_at=now()
+			 WHERE bot_id=$1 AND stopped_at IS NULL`, req.BotId); err != nil {
+			return err
+		}
+		_, err := tx.Exec(ctx, `UPDATE bots SET observed_state='dormant', updated_at=now() WHERE bot_id=$1`, req.BotId)
+		return err
+	})
 	if err != nil {
 		return nil, status.Error(codes.Internal, err.Error())
 	}
-	_, _ = s.st.Pool().Exec(ctx, `UPDATE bots SET observed_state='dormant', updated_at=now() WHERE bot_id=$1`, req.BotId)
 	return &pb.DeregisterResponse{}, nil
 }

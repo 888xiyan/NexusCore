@@ -116,6 +116,7 @@ type Result struct {
 	Reason         string
 	Code           envelope.Code
 	IdempotencyHit bool
+	Actor          config.Actor // 凭证校验通过后回填；拒绝时为零值
 }
 
 // Submit 是所有入口消息的唯一通道。
@@ -151,6 +152,7 @@ func (i *Ingress) Submit(ctx context.Context, env *envelope.Envelope, credential
 		}
 		return res, err
 	}
+	res.Actor = actor
 
 	// 3) 幂等去重 + 载荷/快照落盘 + 审计，全部同事务
 	var payloadRef, snapshotID string

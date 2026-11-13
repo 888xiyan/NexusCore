@@ -133,6 +133,49 @@ func TestRenewLease(t *testing.T) {
 	}
 }
 
+func TestRelease(t *testing.T) {
+	s, _ := newScheduler(t, Options{})
+	ctx := context.Background()
+	j, err := s.Enqueue(ctx, req("echo_bot", "k-release"))
+	if err != nil {
+		t.Fatalf("入队: %v", err)
+	}
+	leased, err := s.Lease(ctx, "echo_bot", "worker-1", nil)
+	if err != nil {
+		t.Fatalf("认领: %v", err)
+	}
+	if leased == nil || leased.JobID != j.JobID {
+		t.Fatalf("认领任务不符合预期: %+v", leased)
+	}
+
+	// 错误令牌释放必须被拒
+	if err := s.Release(ctx, leased.JobID, "wrong-token"); !errors.Is(err, ErrLeaseMismatch) {
+		t.Fatalf("错误令牌释放必须被拒: %v", err)
+	}
+
+	// 成功释放回队列
+	if err := s.Release(ctx, leased.JobID, leased.LeaseToken); err != nil {
+		t.Fatalf("释放任务: %v", err)
+	}
+
+	released, err := s.Get(ctx, j.JobID)
+	if err != nil {
+		t.Fatalf("获取任务: %v", err)
+	}
+	if released.Status != StatusQueued || released.LeaseToken != "" || released.LeaseOwner != "" || released.LeaseUntil != nil {
+		t.Fatalf("释放后任务未恢复 queued 或租约未清空: %+v", released)
+	}
+
+	// 释放后应能被重新认领
+	reclaimed, err := s.Lease(ctx, "echo_bot", "worker-2", nil)
+	if err != nil {
+		t.Fatalf("重新认领: %v", err)
+	}
+	if reclaimed == nil || reclaimed.JobID != j.JobID {
+		t.Fatalf("释放后任务应可被重新认领: %+v", reclaimed)
+	}
+}
+
 func TestPoisonPillBecomesDead(t *testing.T) {
 	s, _ := newScheduler(t, Options{PoisonPill: 3, RetryBackoff: time.Millisecond})
 	ctx := context.Background()
@@ -405,6 +448,38 @@ func TestReplayRequiresConfirmation(t *testing.T) {
 	orig, _ := s.Get(ctx, j.JobID)
 	if orig.ResumeDecision != ResumeReplay || orig.ResumeBy != "user_bot" {
 		t.Fatalf("replay 必须留人工确认审计: %+v", orig)
+	}
+}
+
+func TestDeadLetter(t *testing.T) {
+	s, _ := newScheduler(t, Options{})
+	ctx := context.Background()
+	j, err := s.Enqueue(ctx, req("echo_bot", "k-deadletter"))
+	if err != nil {
+		t.Fatalf("入队: %v", err)
+	}
+
+	// 正常活跃任务可标记为死信
+	if err := s.DeadLetter(ctx, j.JobID, "manual_test"); err != nil {
+		t.Fatalf("标记死信失败: %v", err)
+	}
+	dead, err := s.Get(ctx, j.JobID)
+	if err != nil {
+		t.Fatalf("获取任务: %v", err)
+	}
+	if dead.Status != StatusDead || dead.SuspendReason != "manual_test" {
+		t.Fatalf("期望 dead，得到 %+v", dead)
+	}
+
+	// 终态 (done / cancelled) 或不存在的任务不可标记死信，必须返回 ErrBadTransition
+	if err := s.DeadLetter(ctx, 999999999, "not_exist"); !errors.Is(err, ErrBadTransition) {
+		t.Fatalf("不存在的任务必须返回 ErrBadTransition: %v", err)
+	}
+	doneJob, _ := s.Enqueue(ctx, req("echo_bot", "k-deadletter-done"))
+	leased, _ := s.Lease(ctx, "echo_bot", "w1", nil)
+	_ = s.Complete(ctx, doneJob.JobID, leased.LeaseToken, nil)
+	if err := s.DeadLetter(ctx, doneJob.JobID, "should_fail"); !errors.Is(err, ErrBadTransition) {
+		t.Fatalf("已完成任务不可标记死信: %v", err)
 	}
 }
 

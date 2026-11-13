@@ -445,8 +445,8 @@ func (s *Supervisor) DetectHeartbeatTimeout(ctx context.Context, timeout time.Du
 	rows, err := s.st.Pool().Query(ctx, `
 		SELECT instance_id, bot_id FROM bot_instances
 		 WHERE observed_state='ready' AND stopped_at IS NULL
-		   AND (last_heartbeat_at IS NULL OR last_heartbeat_at < now() - ($1 || ' seconds')::interval)`,
-		fmt.Sprintf("%d", int(timeout.Seconds())))
+		   AND (last_heartbeat_at IS NULL OR last_heartbeat_at < now() - make_interval(secs => $1))`,
+		int(timeout.Seconds()))
 	if err != nil {
 		return 0, fmt.Errorf("扫描心跳超时实例: %w", err)
 	}
