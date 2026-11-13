@@ -11,8 +11,8 @@ NexusCore 是以微内核为基础的个人智能工作台：hub 只做队列 / 
 
 - **M0 工程骨架**：完成。
 - **D-22 记忆插件化重构**：完成，commit `65f3901` 已推送（2026-11-12 核对 origin/main 一致）。
-- **D-23 PostgreSQL + 配置中心**：完成，2026-11-13 随 M1 一并提交（此前长期挂在工作区未提交）。
-- **M1 纯内核 MVP**：**完成**（2026-11-13）。hub 10 模块 + bot-runtime + loopback agent + D-04 四语义 + 失败注入五例；内核 MVP 详设第 8 节六条验收全过，偏离与证据见详设 §10。D-04 已移入已修正归档。
+- **D-23 PostgreSQL + 配置中心**：完成，2026-11-13 随 M1 一并提交（`3a0e2a6`；此前长期挂在工作区未提交）。
+- **M1 纯内核 MVP**：**完成**（2026-11-13，commit `3a0e2a6`，79 文件 +13505/−522）。hub 10 模块 + bot-runtime + loopback agent + D-04 四语义 + 失败注入五例；内核 MVP 详设第 8 节六条验收全过，偏离与证据见详设 §10。D-04 已移入已修正归档。
 - **M2 Bot 管理与插件运营**：下一步（配置完整审批流、插件生命周期、权限授权、DLQ 运营、docker-compose、两级进程模型 L2）。
 - 设计文档已冻结；实现进度详见 `doc/开发规划.md`。
 
@@ -67,7 +67,7 @@ NexusCore 是以微内核为基础的个人智能工作台：hub 只做队列 / 
 
 ## 6. 进度日志（新→旧，最近 20 条）
 
-- 2026-11-13 qoder **M1 纯内核 MVP 完成**：`migrations/kernel` 七对 DDL + 种子、hub 10 模块（store/registry/config/ingress/scheduler/outbox/eventbus/transport/supervisor/grpcd）+ httpapi 入口网关、bot-runtime echo 夹具、loopback agent、CLI；D-04 四语义 + 失败注入五例；新增 supervisor/registry/transport/eventbus 测试与 `hub/recovery_test.go`；`scripts/dev-pg.sh`、`smoke-m1.sh`、`drill-crash-m1.sh`；详设 §10 回写 8 项偏离 + 六条验收证据；D-04 归档；版本升 `0.1.0-m1`。`go test -count=1 ./...`（真库）/ `vet` / `smoke-m1` / `drill-crash-m1` 全绿。**本次连同此前挂起的 D-23 与两级进程模型文档改动一并提交**。
+- 2026-11-13 qoder **M1 纯内核 MVP 完成**（commit `3a0e2a6`，79 文件 +13505/−522）：`migrations/kernel` 七对 DDL + 种子、hub 10 模块（store/registry/config/ingress/scheduler/outbox/eventbus/transport/supervisor/grpcd）+ httpapi 入口网关、bot-runtime echo 夹具、loopback agent、CLI；D-04 四语义 + 失败注入五例；新增 supervisor/registry/transport/eventbus 测试与 `hub/recovery_test.go`；`scripts/dev-pg.sh`、`smoke-m1.sh`、`drill-crash-m1.sh`；详设 §10 回写 8 项偏离 + 六条验收证据；D-04 归档；版本升 `0.1.0-m1`。`go test -count=1 ./...`（真库）/ `vet` / `smoke-m1` / `drill-crash-m1` 全绿。**本次连同此前挂起的 D-23 与两级进程模型文档改动一并提交**；未推送。
 - 2026-11-13 claude 落实 D-23：PostgreSQL 内核化 + 配置中心文档全量更新（架构总结 §3.1/3.3.1/4/6.5/6.6/6.7/6.9/6.11/8/11/12/13、内核 MVP v0.4、新增 `doc/ConfigCenter/`、Bot/Plugin/Memory 详设、开发规划、AGENTS、README、归档 D-23）；代码驱动切 pgx/v5、migrate 改 PG、Makefile DSN 改 `NEXUS_PG_*`；`go build/vet/test` 全绿（沙箱临时安装 Go 1.27.4 验证）；原记"未提交"，已随 2026-11-13 M1 提交入库。
 - 2026-11-12 12:35 qoder 插件 MVP 细节优化：确立两级进程模型与启动 / 优雅关闭 / 强制终止三条链路，全量同步 10 个文件（PluginMvp v0.2 §6 重写、BotMvp v0.2 §8.6-8.7 新增、架构总结 3.3.1/4 图/5.5/6.9/12.3、内核 MVP §3.9/§4.1/§5.3/§6.7、MemoryPlugin §2.2/§8、AGENTS.md 硬约束 9 + 禁忌 5/11、开发规划 M2、两份 README）；build/vet/test 全绿、相对链接 0 broken；**未提交**。
 - 2026-11-12 11:56 qoder 推送 `1c8cbe9` / `109e5c2` / `457a59d` 到 origin/main，本地与远端一致；§7 推送交接移除。

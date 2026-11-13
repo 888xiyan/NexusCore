@@ -8,7 +8,7 @@
 
 ## 2. 工作日志（新→旧）
 
-- 2026-11-13 **M1 纯内核 MVP 完成**（四周内容一次做完）：七对 kernel DDL + 种子、hub 10 模块 + httpapi 入口网关、bot-runtime / loopback agent / CLI、D-04 四语义、失败注入五例、四个模块测试 + 崩溃恢复测试、三个脚本（dev-pg / smoke-m1 / drill-crash-m1）、详设 §10 回写 8 项偏离与六条验收证据、D-04 归档、版本 `0.1.0-m1`。真库 `go test -count=1` / vet / 冒烟 / 崩溃演练全绿。用户三项决策：本地 docker 测试库（不引 docker-compose）、批准 gRPC 依赖、按 §5.0 补齐 proto 字段。
+- 2026-11-13 **M1 纯内核 MVP 完成**（commit `3a0e2a6`，79 文件；四周内容一次做完）：七对 kernel DDL + 种子、hub 10 模块 + httpapi 入口网关、bot-runtime / loopback agent / CLI、D-04 四语义、失败注入五例、四个模块测试 + 崩溃恢复测试、三个脚本（dev-pg / smoke-m1 / drill-crash-m1）、详设 §10 回写 8 项偏离与六条验收证据、D-04 归档、版本 `0.1.0-m1`。真库 `go test -count=1` / vet / 冒烟 / 崩溃演练全绿。用户三项决策：本地 docker 测试库（不引 docker-compose）、批准 gRPC 依赖、按 §5.0 补齐 proto 字段。
 - 2026-11-12 插件 MVP 两级进程模型细节优化：PluginMvp v0.2（§6 重写）+ BotMvp v0.2（§8.6/§8.7 新增）+ 架构总结 / 内核 MVP / MemoryPlugin / AGENTS.md / 开发规划 / 两份 README 全量同步，共 10 文件；四项架构选择由用户拍板。原记"未提交"，已随 2026-11-13 M1 提交入库。
 - 2026-11-12 修复四处文档漂移（`109e5c2`）、登记 bot/ 记忆（`457a59d`），三个提交推送 origin/main 成功。
 - 2026-11-12 通读整个项目（doc/ 全部设计文档与三份原始笔记、全部 Go/proto/构建配置、bot/ 协作协议）；`go build/vet/test` 全绿；四处文档漂移记入 Bots.md §5。
