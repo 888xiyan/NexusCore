@@ -56,6 +56,8 @@ bot/
 | --- | --- | --- | --- | --- | --- |
 | 2026-11-12 | claude | 建立多 agent 协作规范与记忆目录 | `bot/` | done | 本目录首次创建 |
 | 2026-11-12 11:43 | qoder | 通读整个项目（设计文档 + 代码骨架 + bot/ 协议） | 全仓库只读核查 + 记忆登记 | done | Bots.md §5/§6 更新 |
+| 2026-11-12 12:10 | qoder | 插件进程两级模型细节优化（启动 / 优雅关闭 / 强制 kill） | `doc/PluginMvp/`、`doc/BotMvp/`、架构总结、内核 MVP、MemoryPlugin、AGENTS.md、开发规划、两份 README | done | 10 文件已改，build/vet/test 全绿；已随 2026-11-13 M1 提交入库 |
+| 2026-11-13 | qoder | M1 纯内核 MVP 实现 + 验收 + 文档回写 | `migrations/kernel/`、`hub/`（10 模块 + httpapi）、`internal/{envelope,pgtest}`、`bot-runtime/`、`agent-daemon/`、`cli/`、`scripts/`、详设 §10、D-04 归档 | done | 详设第 8 节六条全过；真库 test/vet/smoke-m1/drill-crash-m1 全绿；见 Bots.md §6/§7 |
 
 ## 5. 记忆写入规范
 

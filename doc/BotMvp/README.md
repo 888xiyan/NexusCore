@@ -6,7 +6,7 @@
 
 | 文件 | 内容 |
 | --- | --- |
-| [BotMvp详细设计.md](BotMvp详细设计.md) | 角色清单与部署形态、四角色详设、插件侧 Bot、数据模型、指标 / 决策命令、冒烟链路、验收标准 |
+| [BotMvp详细设计.md](BotMvp详细设计.md) | 角色清单与部署形态、四角色详设（含配置中心职责）、插件侧 Bot（含 owner bot 职责）、数据模型、指标 / 决策命令、插件进程优雅关闭与强制终止、冒烟链路、验收标准 |
 
 ## 上游设计
 
@@ -16,8 +16,10 @@
 
 ## 相关设计
 
+- 配置中心（D-23）：[../ConfigCenter/ConfigCenter详细设计.md](../ConfigCenter/ConfigCenter详细设计.md)。`user_bot` 是唯一批准人，`security_bot` 只做可执行类预审，`create_bot` / `monitor_bot` 只读 active 投影与版本。
+- 插件进程两级模型：[../PluginMvp/PluginMvp详细设计.md](../PluginMvp/PluginMvp详细设计.md) §6。Bot 进程（L1）由 `create_bot` 决策、supervisor 执行；插件进程（L2）由 owner bot（`bot_templates[0]`）拉起与回收，PID 登记给 `monitor_bot` 只读巡检，强制终止与孤儿级联回收仍由 supervisor 执行。
 - 用户级 Bot 默认个人记忆（`personal_stack_v1`）：[../MemoryPlugin/用户级Bot默认个人记忆架构.md](../MemoryPlugin/用户级Bot默认个人记忆架构.md)。该 profile 由记忆插件 `plugin_memory` 实现，内核只存储 `memory_profile` 声明、不解释；内核侧四角色不使用记忆。
 
 ## MVP 交付形态（一句话）
 
-hub 启动时拉起 `user_bot / monitor_bot / security_bot` 三个 resident 进程与一个懒加载的 `create_bot` worker；内核侧四角色与插件注册的 `xxx_bot` 均通过同一个 bot-runtime 二进制承载，共享 gRPC 控制面。首次即可在 CLI 里完成"插件注册 → security_bot 审查 → xxx_bot 注册 → create_bot 拉起 → monitor_bot 监督"全链路。
+hub 启动时拉起 `user_bot / monitor_bot / security_bot` 三个 resident 进程与一个懒加载的 `create_bot` worker；内核侧四角色与插件注册的 `xxx_bot` 均通过同一个 bot-runtime 二进制承载，共享 gRPC 控制面。首次即可在 CLI 里完成"插件注册 → security_bot 审查 → xxx_bot 注册 → create_bot 拉起 → monitor_bot 监督"全链路。插件侧再往下延伸一级：owner bot 拉起插件进程并把 PID 登记给 `monitor_bot`，关闭走 `plugin stop`（优雅，经 owner bot）或 `plugin kill --confirm`（强制，supervisor 代执行）。

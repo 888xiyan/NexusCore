@@ -3,7 +3,9 @@ package nexus.v1;
 
 option go_package = "github.com/888xiyan/NexusCore/proto/gen/v1";
 
-// Bot↔Kernel 控制面（见内核 MVP 详设 5.1 / 架构总结 5.4）。
+// Bot↔Kernel 控制面（见内核 MVP 详设 §5.0 / 架构总结 §5.4）。
+// 字段对齐 D-23：Register/Heartbeat 增 config_version，SubscribeRequest 补 scope 与 request_id。
+// 既有字段编号保持不变，新增字段使用新编号以兼容。
 service BotRuntime {
   rpc Register(RegisterRequest) returns (RegisterResponse);
   rpc Heartbeat(HeartbeatRequest) returns (HeartbeatResponse);
@@ -18,6 +20,7 @@ message RegisterRequest {
   string bot_id = 1;
   string manifest_digest = 2;
   repeated string capabilities = 3;
+  int64 config_version = 4;
 }
 message RegisterResponse {
   string token = 1;
@@ -26,6 +29,7 @@ message RegisterResponse {
 message HeartbeatRequest {
   string bot_id = 1;
   repeated string job_lease_tokens = 2;
+  int64 config_version = 3;
 }
 message HeartbeatResponse {}
 message StreamTasksRequest {
@@ -46,6 +50,8 @@ message AckTaskResponse {}
 message SubscribeRequest {
   string consumer_group = 1;
   repeated string event_types = 2;
+  string scope = 3;
+  string request_id = 4;
 }
 message Event {
   string event_id = 1;

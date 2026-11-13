@@ -11,11 +11,12 @@
 
 ## 上游设计
 
-- 架构总设计：[../NexusCore架构设计总结.md](../NexusCore架构设计总结.md)（§3.1 / 3.2 / 3.3.1 / 3.4 / 6.7 / 7 / 8）
-- 插件 MVP：[../PluginMvp/PluginMvp详细设计.md](../PluginMvp/PluginMvp详细设计.md)（manifest / 生命周期 / 命名 / 卸载清理）
-- 内核 MVP：[../内核mvp/内核MVP详细设计.md](../内核mvp/内核MVP详细设计.md)（只提供队列、Bot 运行时、传输与审计；无记忆模块）
+- 架构总设计：[../NexusCore架构设计总结.md](../NexusCore架构设计总结.md)（§3.1 / 3.2 / 3.3.1 / 3.4 / 6.7 / 6.11 / 7 / 8）
+- 插件 MVP：[../PluginMvp/PluginMvp详细设计.md](../PluginMvp/PluginMvp详细设计.md)（manifest / 生命周期 / 命名 / 卸载清理 / 两级进程）
+- 配置中心：[../ConfigCenter/ConfigCenter详细设计.md](../ConfigCenter/ConfigCenter详细设计.md)（plugin_memory 的 `plugin` 配置）
+- 内核 MVP：[../内核mvp/内核MVP详细设计.md](../内核mvp/内核MVP详细设计.md)（只提供队列、Bot 运行时、配置与传输；无记忆模块）
 - 开发规划：[../开发规划.md](../开发规划.md)（M3 = 记忆插件 v1，M4 = 认知闭环）
 
 ## MVP 交付形态（一句话）
 
-`plugin_memory` = `plugin_manifest` + 知识服务（Go）+ `memory_bot`（插件侧 Bot）+ 若干类型化表（`memory` / `vault` 双 schema）+ 工具面（read / search / create / promote / assemble_context / audit / health）；M3 以 Obsidian 单向发布与变更摄取首发，M4 接入 memory-worker 完成上下文装配与记忆晋升闭环。
+`plugin_memory` = `plugin_manifest` + 知识服务（Go，L2）+ `memory_bot`（L1）+ 若干类型化表（`memory` / `vault` 两个 PostgreSQL schema，pgvector 侧表 M4）+ 工具面（read / search / create / promote / assemble_context / audit / health）+ `plugin` 配置文档；M3 以 Obsidian 单向发布与变更摄取首发，M4 接入 memory-worker 完成上下文装配与记忆晋升闭环。

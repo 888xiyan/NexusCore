@@ -10,20 +10,20 @@ import (
 	"strconv"
 
 	"github.com/888xiyan/NexusCore/internal/migrate"
-	_ "github.com/go-sql-driver/mysql"
+	_ "github.com/jackc/pgx/v5/stdlib"
 )
 
 func main() {
 	var (
 		cmdStr = flag.String("cmd", "probe", "up / down / probe")
-		dsn    = flag.String("dsn", "", "目标库 DSN，如 user:pass@tcp(host:3306)/nexus_kernel")
+		dsn    = flag.String("dsn", "", "目标库 DSN，如 postgres://user:pass@host:5432/nexus")
 		dir    = flag.String("dir", "", "迁移目录，如 migrations/kernel")
 		to     = flag.String("to", "", "迁移到的版本（可选）")
 	)
 	flag.Parse()
 
 	if *dsn == "" || *dir == "" {
-		fmt.Fprintln(os.Stderr, "必须提供 -dsn 与 -dir；示例：migrate -cmd probe -dsn \"$MYSQL_KERNEL_DSN\" -dir migrations/kernel")
+		fmt.Fprintln(os.Stderr, "必须提供 -dsn 与 -dir；示例：migrate -cmd probe -dsn \"$NEXUS_PG_KERNEL_DSN\" -dir migrations/kernel")
 		os.Exit(2)
 	}
 	listDir := func(d string) ([]string, error) {
@@ -40,7 +40,7 @@ func main() {
 	readFile := func(name string) ([]byte, error) { return os.ReadFile(*dir + "/" + name) }
 
 	ctx := context.Background()
-	db, err := sql.Open("mysql", *dsn)
+	db, err := sql.Open("pgx", *dsn)
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "打开 DSN:", err)
 		os.Exit(1)

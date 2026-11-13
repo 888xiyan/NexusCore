@@ -3,7 +3,7 @@
 > 评审时间：2026-11-05  
 > 评审对象：`doc/NexusCore架构设计总结.md`（当前仓库尚无实现代码，本评审针对设计文档）  
 > 评审视角：消息队列 / 中间件工程语义（投递保证、幂等、租约、因果序、崩溃恢复）  
-> 状态：归档于 2026-11-12，共 19 项已修正（D-01 至 D-03、D-05 至 D-10、D-13 至 D-22）  
+> 状态：归档于 2026-11-13，共 21 项已修正（D-01 至 D-10、D-13 至 D-23）  
 > 未解决的问题见 `NexusCore待修正问题清单.md`
 
 ## 1. 已修正总览
@@ -13,6 +13,7 @@
 | D-01 | P0 | 微内核声明与第 4 节架构图矛盾，Arbiter/Assembler 属强业务组件 | 3.1 / 4 / 7.1 / 7.2 | 2026-11-07 |
 | D-02 | P0 | 事件总线投递语义未定义，失效事件丢失会静默破坏一致性 | 3.1 / 6.1 / 7.5 | 2026-11-07 |
 | D-03 | P0 | 失效事件被当成正确性机制，但运行中任务无法可靠消费它 | 6.2 / 7.5 | 2026-11-07 |
+| D-04 | P0 | 队列缺少幂等键、租约续期、挂起状态与安全的 DLQ replay | 5.2 / 6.4 / 6.5 | 2026-11-13 |
 | D-05 | P0 | 跨队列因果链无 parent 关联与 happens-before 定义 | 6.1 / 6.6 | 2026-11-07 |
 | D-06 | P1 | kernel_entities 是 EAV god-table，PM 任务状态与知识资产共表 | 8.1 / 8.2 | 2026-11-07 |
 | D-07 | P1 | NULL 编码记忆象限，数据库无法守护公共记忆写路径 | 7.3 / 8.3 | 2026-11-07 |
@@ -29,6 +30,7 @@
 | D-20 | P1 | Bot 未分内核侧 / 插件侧角色体系，工厂 / 监督 / 安全角色缺失 | 3.3.1 / 5.5 / 11 | 2026-11-10 |
 | D-21 | P0 | 知识访问与图谱存储仍被归入 hub 原语，进程与数据库账号边界未拆分 | 3.1 / 4 / 8.4 / 11 | 2026-11-11 |
 | D-22 | P0 | 记忆仍以内核数据面形态存在，内核与内核侧 Bot 被迫携带记忆职责 | 1 / 3.1 / 7 / 8 / 13 | 2026-11-12 |
+| D-23 | P0 | 状态底座与配置分散：MySQL 队列、manifest/环境变量散落，缺少统一配置来源与审批 | 3.1 / 6.5 / 6.11 / 8 | 2026-11-13 |
 
 ## 2. 修正要点速览
 
@@ -40,6 +42,8 @@
 6. **Bot 运行（D-17 / D-18）**：Bot 是内核创建、监督、回收的独立二进制；分 lazy（按需、空闲回收、`agent_connection=per_task`）与 resident（常驻、持久长连接）两类，内核按 `activation_mode` reconcile。
 7. **角色体系（D-20）**：Bot 分内核侧四角色（user_bot 预置 / create_bot 工厂 / monitor_bot 监督 / security_bot 安全与热更新治理）与插件侧 xxx_bot / user_xxx_bot；命名即角色，保留名禁用；拉起决策在 create_bot、执行在内核 supervisor。
 8. **记忆插件化（D-22）**：记忆与知识能力完整归 knowledge 类插件 `plugin_memory`；内核与内核侧四角色不感知记忆；内核 schema 与插件 schema 分离；Health 聚合改由 monitor_bot；插件事件经 `memory_bot` 投递委托回投；图谱表更名 `memory_*`；M1 内核 MVP 变为纯内核。
+9. **PostgreSQL + 配置中心（D-23）**：PostgreSQL 成为内核唯一状态底座（单 database + 三 schema；SKIP LOCKED + LISTEN/NOTIFY + 兜底轮询）；配置中心作为 hub 控制面模块统一保存 plugin / bot / agent / global 四类期望配置，proposal → security → user_bot 批准 → active；只存 secret_ref；MCP / Skill 明确不在范围。
+10. **队列四语义（D-04）**：`idempotency_key` 唯一约束 + 租约续期 + 持久化 `suspended` + 人工确认幂等 replay（continue / replay / discard）；副作用先落 `kernel_job_intents` 再执行，租约过期时按"有无已执行意图"决定自动重试还是挂起；M1 已在真库落地并验收。
 
 ## 3. 详细修正记录
 
@@ -66,6 +70,23 @@
 **影响**：事件迟到、乱序、丢失三类场景导致无法复现的记忆冲突。
 
 **修正（2026-11-07）**：7.5 明确降级语义——正确性唯一来源是提交时乐观锁版本检查（7.4）+ 冲突合并；invalidation 仅用于新任务拉最新记忆与 UI 提示；进行中任务不承诺感知失效。正确性分工表已入文档。
+
+### D-04（P0）队列缺少幂等、租约续期与挂起状态
+
+**问题**：`kernel_jobs` 只有 `lease_until / attempt_count`，缺幂等键、租约续期、持久化挂起状态与安全 replay；ack 丢失会重复回复、长任务租约过期会被第二 worker 抢走并双重执行非幂等副作用、yield_confirm 挂起随 hub 重启丢失、毒丸任务卡死队列。
+
+**影响**：数据库队列最经典的翻车点：重复回复、双重执行、挂起任务丢失、毒丸卡死。
+
+**修正（2026-11-13，M1 落地）**：语义先并入内核 MVP 详设 §3.5 / §5.2，M1 完成实现与真库验收：
+
+1. `kernel_jobs.idempotency_key` UNIQUE；`EnqueueTxIfAbsent` 用 `ON CONFLICT DO NOTHING` 避免重复入队把事务打成 aborted。
+2. 租约续期 `RenewLease`；`lease_token` 与 `AckTask` 绑定防双 worker；所有租约比较用数据库时钟 `now()`。
+3. `suspended` 是持久化 job 状态（不是连接状态），跨 hub 重启保留，`resume-list` 仍可见。
+4. 副作用先落 `kernel_job_intents`（`UNIQUE(job_id, seq)`）再执行；租约过期时**有 `idempotency_key` 且无 `executed` 意图**才自动 `retry_backoff`，否则 `suspended / lease_expired` 等人工确认，绝不自动重放已执行副作用。
+5. 人工确认三选一 `continue / replay / discard`，必须携带确认人与因果上下文；`replay` 生成新幂等键重新入队。DDL 以 CHECK 强制 `resume_decision` 非空时必须有 `resume_by / resumed_at`，`suspended` 必须有 `suspend_reason`。
+6. 毒丸 N=5 熔断进 `dead`；严格分区用 `pg_try_advisory_xact_lock` + 队头检查保证不越位；`LISTEN/NOTIFY` 唤醒 + 5-10s 兜底轮询（通知丢失不阻塞）。
+
+**证据**：`hub/scheduler/scheduler_test.go`（四语义 + 分区有序 + 并发认领 + 兜底轮询 + 重启保留）、`hub/recovery_test.go`（跨重启租约过期判定）、`make smoke-m1`、`make drill-crash-m1`（真实 SIGKILL 下无重复副作用）。详见内核 MVP 详设 §10.2。
 
 ### D-05（P0）跨队列因果链无定义
 
@@ -194,3 +215,11 @@
 **影响**：任何记忆模型调整都会反向冲击内核文档与实现；内核侧与插件侧的边界模糊，删除记忆能力不再是纯粹卸载一个插件。
 
 **修正（2026-11-12）**：记忆即插件（用户决策）——所有记忆与知识能力（四象限记忆、个人金库、知识图谱、版本与晋升、Context Assembler、Memory Arbiter、用户级 Bot 个人记忆）完整归 knowledge 类插件 `plugin_memory`；内核与内核侧四角色不感知、不持有、不装配任何记忆；内核 schema（`kernel`）与插件 schema（`memory` / `vault`）分离，hub 只持 `kernel` 账号；Health 聚合改由 `monitor_bot`；插件事件经其 `memory_bot` 的单次投递委托回投；图谱表更名 `memory_*`；新增 `doc/MemoryPlugin/` 详设；M1 内核 MVP 收敛为纯内核（冒烟改用 `echo_bot` 夹具）。架构总结、内核 / Bot / Plugin 详设、开发规划、AGENTS、README 与代码骨架（`plugins/plugin_memory`、`migrations` 目录）同步。
+
+### D-23（P0）状态底座与配置来源分散
+
+**问题**：内核队列建在 MySQL 上、运行时配置散落在 manifest / 环境变量 / 插件自管文件中；插件、Bot、Agent 的运行配置没有统一来源、版本与审批，改动不可追溯、不可回滚，也无法约束"谁能改配置"。
+
+**影响**：配置漂移与双真相无法收敛；DB 队列缺少可靠的唤醒与顺序原语；单人环境下仍要维护多套配置入口。
+
+**修正（2026-11-13）**：PostgreSQL 成为内核唯一状态底座——单 database `nexus`，`kernel / memory / vault` 三 schema 与角色隔离；队列使用 `SKIP LOCKED` 认领、`LISTEN/NOTIFY` 唤醒 + 5-10s 兜底轮询、严格分区 advisory lock。新增配置中心模块（不是第四原语）：`plugin / bot / agent / global` 四类期望配置，`proposal → security_bot 预审（可执行类）→ user_bot 批准（绑定 checksum）→ active`，版本化、可回滚，只存 `secret_ref`。内核侧四角色职责同步：user_bot 批准、create_bot 读 active 投影、monitor_bot 观测配置漂移、security_bot 预审。**MCP / Skill 不纳入配置中心**（无运行时，未来另立设计）。新增 `doc/ConfigCenter/` 详设；架构总结、内核 / Bot / Plugin / Memory 详设、开发规划、AGENTS、README 同步。

@@ -1,4 +1,5 @@
-// Package migrate 实现双库顺序 SQL 迁移：成对 up/down 文件 + _migrations 记录表。
+// Package migrate 实现内核 schema 的顺序 SQL 迁移：成对 up/down 文件 + _migrations 记录表。
+// 目标库为 PostgreSQL；调用方通过 pgx 的 database/sql 驱动打开连接。
 package migrate
 
 import (
@@ -68,19 +69,19 @@ func List(dir string, list func(dir string) ([]string, error)) ([]Item, error) {
 	return out, nil
 }
 
-// Probe 检查 DSN 可连通性并回显当前迁移记录数。
+// Probe 检查 DSN 可连通性并按当前 search_path 回显迁移记录数。
 func Probe(ctx context.Context, db *sql.DB) (int, error) {
 	if err := db.PingContext(ctx); err != nil {
 		return 0, err
 	}
-	var n int
-	row := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name = '_migrations'")
-	if err := row.Scan(&n); err != nil {
+	var exists bool
+	if err := db.QueryRowContext(ctx, "SELECT to_regclass('_migrations') IS NOT NULL").Scan(&exists); err != nil {
 		return 0, fmt.Errorf("读取迁移状态: %w", err)
 	}
-	if n == 0 {
+	if !exists {
 		return 0, nil
 	}
+	var n int
 	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM _migrations").Scan(&n); err != nil {
 		return 0, fmt.Errorf("统计 _migrations: %w", err)
 	}
@@ -93,8 +94,8 @@ func EnsureTable(ctx context.Context, db *sql.DB) error {
 CREATE TABLE IF NOT EXISTS _migrations (
   version     INT          NOT NULL PRIMARY KEY,
   name        VARCHAR(128) NOT NULL,
-  applied_at  TIMESTAMP    NOT NULL DEFAULT CURRENT_TIMESTAMP
-) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4`)
+  applied_at  TIMESTAMPTZ  NOT NULL DEFAULT now()
+)`)
 	return err
 }
 
@@ -141,7 +142,7 @@ func Run(ctx context.Context, db *sql.DB, items []Item, up bool, read func(path 
 			if err := exec(it.UpPath); err != nil {
 				return err
 			}
-			_, err := db.ExecContext(ctx, "INSERT INTO _migrations (version, name) VALUES (?, ?)", it.Version, it.Name)
+			_, err := db.ExecContext(ctx, "INSERT INTO _migrations (version, name) VALUES ($1, $2)", it.Version, it.Name)
 			if err != nil {
 				return fmt.Errorf("记录迁移 %04d: %w", it.Version, err)
 			}
@@ -158,7 +159,7 @@ func Run(ctx context.Context, db *sql.DB, items []Item, up bool, read func(path 
 		if err := exec(it.DownPath); err != nil {
 			return err
 		}
-		if _, err := db.ExecContext(ctx, "DELETE FROM _migrations WHERE version = ?", it.Version); err != nil {
+		if _, err := db.ExecContext(ctx, "DELETE FROM _migrations WHERE version = $1", it.Version); err != nil {
 			return fmt.Errorf("移除记录 %04d: %w", it.Version, err)
 		}
 		fmt.Printf("down %04d_%s\n", it.Version, it.Name)

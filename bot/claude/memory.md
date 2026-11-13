@@ -9,6 +9,7 @@
 
 ## 2. 工作日志（新→旧）
 
+- 2026-11-13 落实 D-23：PostgreSQL 内核化 + 配置中心，全量更新架构总结、内核 MVP v0.4、新增 `doc/ConfigCenter/`、Bot/Plugin/Memory 详设、开发规划、AGENTS、README、归档；代码切 pgx/v5 并用临时 Go 1.27.4 跑通 build/vet/test。
 - 2026-11-12 评估并落地多 agent 文件协作与记忆规范；创建 `bot/BOT.md`、`bot/Bots.md`、本文件与模板。
 - 2026-11-12 完成 D-22 记忆插件化重构并提交 `65f3901`；push 因沙箱无凭据未完成，已写入交接。
 
@@ -18,6 +19,9 @@
 - 2026-11-12 [已验证] 沙箱内的 git 身份未配置；提交前需按历史 commit 设置仓库级 `user.name/email`（888xiyan / 3551206040@qq.com）。
 - 2026-11-12 [已验证] 修改文档后先跑两类检查再收工：相对链接存在性、旧术语残留 grep（历史评审 / 归档 / 修订记录中的旧词允许保留）。
 - 2026-11-12 [已验证] 删除用户目录文件时若报 `Operation not permitted`，先调用 `allow_cowork_file_delete`（需传 VM 路径）。
+- 2026-11-13 [已验证] Claude 沙箱默认无 Go，可从 `https://go.dev/dl/` 下载 linux-amd64 tarball 到 `/tmp` 临时使用（68MB）；设置 `GOCACHE=/tmp/gocache GOPATH=/tmp/gopath`，可跑 `go mod tidy/build/vet/test` —— 证据: 本次 D-23 验证。
+- 2026-11-13 [已验证] PostgreSQL 迁移 CLI 用 `database/sql` + `pgx/v5/stdlib`（driver 名 `pgx`）；探活用 `to_regclass('_migrations')`，避免 MySQL 的 information_schema/`DATABASE()` 写法。
+- 2026-11-13 [已验证] 改 AGENTS 硬约束时不要插入新编号（9/14/17 被多处引用），把新约束写成既有条目的第二段 —— 证据: qoder 记忆 + 本次配置中心约束落在硬约束 5 第二段。
 
 ## 4. 未验证假设
 
@@ -25,4 +29,5 @@
 
 ## 5. 交接
 
-- 下一步优先 M1：`migrations/kernel` DDL → ingress 校验器 → scheduler D-04 四语义；开工前先读 Bots.md §7。
+- D-23 改动（文档 + pgx 骨架 + `doc/ConfigCenter/`）尚未提交；先在宿主机跑 `go mod tidy && make build && make test && make vet`，再提交并推送。
+- 下一步优先 M1：`migrations/kernel` PostgreSQL DDL → ingress 校验器 → scheduler D-04 四语义（NOTIFY + 兜底轮询）→ 配置最小读集；开工前先读 Bots.md §7。

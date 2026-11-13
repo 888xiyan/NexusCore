@@ -35,7 +35,7 @@ plugin_manifest
 ├── publishing[]        # plugin_memory.memory.updated / plugin_memory.memory.invalidated
 ├── providing_tools[]   # read / search / create / promote / assemble_context / audit / health
 ├── requiring_tools[]   # 无（不依赖他人工具）
-├── bot_templates[]     # [memory_bot]：lazy，per_task
+├── bot_templates[]     # [memory_bot]：lazy，per_task；[0] 即 owner bot，持有知识服务进程
 ├── resource_limits     # {cpu_ms, memory_mb}
 ├── required_tables[]   # memory_entities 等（见第 3 节）
 └── schema_version      # 1
@@ -50,7 +50,7 @@ plugin_manifest
 | `memory_bot` | Go（bot-runtime） | 插件在总线上的身份；订阅事件、执行插件任务、回投事件 | M3 |
 | 发布器 / 摄取服务 | Go（可并入知识服务） | Obsidian 单向发布 + File Watcher 变更摄取（与 `plugin_obsidian` 协作） | M3 |
 
-进程关系：知识服务与 `memory_bot` 为独立进程；memory-worker 由知识服务按需拉起（M4 允许库内占位），全部属于插件自己的进程域，内核 supervisor 只监管 `memory_bot`（它是注册 Bot），其余进程由插件自行管理。
+进程关系（两级进程模型，见 [PluginMvp §6](../PluginMvp/PluginMvp详细设计.md)）：`memory_bot` 是 **Bot 进程（L1）**，由 `create_bot` 决策、内核 supervisor exec；知识服务是 **插件进程（L2）**，即 `plugin_manifest.binary`，由 `memory_bot`（owner bot = `bot_templates[0]`）exec 与回收，PID 经 `channel=health` 登记到 `kernel_plugin_processes` 供 `monitor_bot` 只读巡检。memory-worker 是 **L3**，由知识服务按需拉起（M4 允许库内占位），内核不登记，回收按进程组级联。全部属于插件自己的进程域：supervisor 对 L2 只做强制终止与孤儿级联回收，优雅关闭由 `memory_bot` 通知知识服务完成。
 
 ### 2.3 与内核的关系
 
@@ -67,12 +67,12 @@ hub ──事件投递（task.state.changed 等）──▶ memory_bot ──▶
 
 ### 3.1 schema 与账号
 
-| schema | 内容 | 账号 |
+| schema | 内容 | 角色 |
 | --- | --- | --- |
-| `memory` | 项目公共记忆、Bot 角色经验、任务现场、版本历史、晋升队列、审计、Outbox、跨库引用 | 插件图谱账号（读写）+ 晋升消费者账号（`project_public` 写） |
-| `vault` | 个人笔记、全局公理（仅 `visibility=global`） | 插件金库账号（唯一持有者） |
+| `memory` | 项目公共记忆、Bot 角色经验、任务现场、版本历史、晋升队列、审计、Outbox、跨库引用 | 插件图谱角色（读写）+ 晋升消费者角色（`project_public` 写） |
+| `vault` | 个人笔记、全局公理（仅 `visibility=global`） | 插件金库角色（唯一持有者） |
 
-内核账号对以上 schema 无任何权限。迁移文件位于 `migrations/plugins/plugin_memory/{memory,vault}/NNNN_name.{up,down}.sql`，由插件 install / upgrade 时经 `security_bot` 审查后入库（PluginMvp §7）。
+三个 schema 位于同一 PostgreSQL 实例（database `nexus`），与内核 `kernel` schema 做角色隔离；内核角色对以上 schema 无任何权限。迁移文件位于 `migrations/plugins/plugin_memory/{memory,vault}/NNNN_name.{up,down}.sql`，由插件 install / upgrade 时经 `security_bot` 审查后入库（PluginMvp §7）。
 
 ### 3.2 表清单
 
@@ -84,7 +84,8 @@ memory schema
 ├── memory_promotion_queue      # 晋升队列（唯一写 project_public 的入口）
 ├── memory_audit_log            # append-only 访问审计
 ├── memory_outbox               # 本地事务 Outbox
-└── memory_external_refs        # 跨 schema 单向引用（vault）
+├── memory_external_refs        # 跨 schema 单向引用（vault）
+└── memory_embeddings           # 向量侧表（M4，pgvector；MVP 不启用）
 
 vault schema
 ├── memory_entities             # 同构，仅 visibility=global
@@ -104,13 +105,12 @@ owner_bot_id    VARCHAR(64) NULL
 project_id      VARCHAR(64) NULL
 visibility      VARCHAR(16) NOT NULL  # CHECK 双库不同（见 3.4）
 title           VARCHAR(512)
-content         LONGTEXT
-metadata_json   JSON                  # 仅展示性字段
-embedding       BLOB                  # M4 前不启用（D-11），仅保留列
+content         text
+metadata_json   jsonb                 # 仅展示性字段
 version         BIGINT NOT NULL DEFAULT 1
 edge_epoch      BIGINT NOT NULL DEFAULT 0
 updated_by_bot_id VARCHAR(64)
-updated_at      TIMESTAMP
+updated_at      timestamptz
 INDEX idx_memory_visibility (visibility, project_id, namespace, owner_bot_id)
 INDEX idx_memory_namespace (namespace, updated_at)
 ```
@@ -122,10 +122,21 @@ relation_id     BIGINT PK
 source_id       VARCHAR(36)
 target_id       VARCHAR(36)
 relation_type   VARCHAR(64)   # wikilink / remembers / annotated_from / implemented_in
-weight          DOUBLE
-valid_from / valid_to TIMESTAMP NULL
+weight          DOUBLE PRECISION
+valid_from / valid_to timestamptz NULL
 INDEX idx_rel_source (source_id, relation_type, valid_to)
 INDEX idx_rel_target (target_id, relation_type, valid_to)
+```
+
+**memory_embeddings（M4，pgvector 侧表）**
+
+```text
+entity_id       VARCHAR(36)
+model_name      VARCHAR(64)      # 多模型共存 / 灰度切换
+dim             INT
+embedding       vector(1536)     # pgvector 扩展；不可用时插件降级为关键词检索
+updated_at      timestamptz
+PRIMARY KEY (entity_id, model_name)
 ```
 
 **memory_entity_versions**
@@ -216,7 +227,7 @@ CHECK (visibility IN ('bot_private','project_public','ephemeral')
        AND NOT (visibility='ephemeral'      AND (owner_bot_id IS NULL     OR project_id IS NULL)))
 ```
 
-`visibility` 必须 `NOT NULL`（MySQL CHECK 对 UNKNOWN 放行）。`project_public` 的 INSERT / UPDATE 仅授予晋升消费者账号，其余插件账号在数据库层被拒绝。
+`visibility` 必须 `NOT NULL`（PostgreSQL CHECK 对 UNKNOWN 结果放行，允许 NULL 会绕过约束）。`project_public` 的 INSERT / UPDATE 仅授予晋升消费者角色，其余角色在数据库层被拒绝。
 
 ## 4. 记忆模型与一致性
 
@@ -319,12 +330,14 @@ plugin_memory.health()                               -> HealthStatus
 
 ## 8. 部署、升级与卸载
 
-1. 部署形态：知识服务 + `memory_bot` 两个进程（M3），memory-worker 由知识服务按需拉起（M4）；与内核分开部署、分开暴露健康检查。
-2. 升级：走插件 upgrade 流程（security 审查 → drain `memory_bot` → 切换 `binary_digest` → 新进程 ready）；知识服务采用滚动切换，Outbox 不丢。
+1. 部署形态：`memory_bot`（L1）+ 知识服务（L2）两个进程（M3），memory-worker（L3）由知识服务按需拉起（M4）；与内核分进程部署、分开暴露健康检查。MVP 限单机同 OS 用户（PID 归属校验与信号发送依赖 `/proc`，见 PluginMvp §6.1 规则 6）。
+2. 升级：走插件 upgrade 流程（security 审查 → 优雅关闭知识服务 → drain `memory_bot` → 切换两个 `binary_digest` → 新 Bot ready → exec 新知识服务 → 上报新 PID）；`memory_outbox` pending 续扫，事件不丢。
 3. 卸载：
-   - `keep` 模式：`memory_bot` 下线、订阅反注册，`memory` / `vault` 数据保留。
+   - `keep` 模式：知识服务优雅关闭 → `memory_bot` 下线（先子后父）、订阅反注册，`memory` / `vault` 数据保留。
    - `confirm` 模式：用户确认后由插件 DDL 清理（涉及个人知识，必须二次确认；vault 默认强制保留）。
+   - 知识服务卡死时才以 `plugin kill plugin_memory --confirm` 兜底（supervisor 强制终止）；不作为默认路径，避免丢未落盘的 Outbox 与晋升中间态。
 4. 降级：vault 不可用 → 装配降级为“无个人上下文”，项目任务照常；memory 不可用 → 依赖记忆的任务进入等待或 DLQ，不静默丢上下文。
+5. 配置中心（D-23）：本插件拥有 `scope_type=plugin, scope_id=plugin_memory` 的 `plugin` 配置（如 Dream 阈值、装配上限、检索条数、向量模型），变更走 `propose → user_bot approve → activate`；配置变更由 owner bot 决定 L2 重载或重启，并上报 `config_version`。
 
 ## 9. 里程碑与验收
 

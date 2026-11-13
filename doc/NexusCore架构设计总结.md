@@ -1,12 +1,12 @@
 # NexusCore 架构设计总结
 
-> 整理时间：2026-11-05（最近修订：2026-11-12，D-22 记忆插件化）
+> 整理时间：2026-11-05（最近修订：2026-11-13，D-23 PostgreSQL 内核化与配置中心）
 > 来源：`doc/` 下三份架构讨论笔记，以及后续关于队列调度、多 Bot 记忆一致性与记忆插件化的补充讨论
 > 状态：设计文档，尚未对应到已实现代码
 
 ## 1. 一句话定位
 
-NexusCore 是一个以微内核为基础的个人智能工作台：内核只负责持久化事件与任务队列、Bot 注册与运行时、跨设备路由；所有具体业务功能（包括记忆与知识管理）都以插件形式接入。系统同时遵守“脑手分离”原则，Bot 作为长期决策体运行在内核侧或插件侧，Agent 作为无人格执行探针运行在本地或远程设备上。记忆与知识能力（四象限记忆、个人金库、知识图谱、晋升与上下文装配）完整归属于记忆插件 `plugin_memory`：内核与内核侧四角色（`user_bot / create_bot / monitor_bot / security_bot`）不感知、不持有、不装配任何记忆；删除记忆插件后，内核仍可作为队列与运行时底座独立运行。项目公共记忆是多个 Bot 的共享协作锚点，Bot 工作区只保存私有草稿，跨 Bot 可见的信息必须经过记忆插件内的队列化晋升和一致性仲裁。
+NexusCore 是一个以微内核为基础的个人智能工作台：内核只负责持久化事件与任务队列、Bot 注册与运行时、跨设备路由；所有具体业务功能（包括记忆与知识管理）都以插件形式接入。内核的持久状态底座为 PostgreSQL（单 database `nexus`，`kernel / memory / vault` 三个 schema）：持久队列直接建在 PG 上，另有一个内嵌的配置中心模块（D-23）。系统同时遵守“脑手分离”原则，Bot 作为长期决策体运行在内核侧或插件侧，Agent 作为无人格执行探针运行在本地或远程设备上。记忆与知识能力（四象限记忆、个人金库、知识图谱、晋升与上下文装配）完整归属于记忆插件 `plugin_memory`：内核与内核侧四角色（`user_bot / create_bot / monitor_bot / security_bot`）不感知、不持有、不装配任何记忆；删除记忆插件后，内核仍可作为队列与运行时底座独立运行。项目公共记忆是多个 Bot 的共享协作锚点，Bot 工作区只保存私有草稿，跨 Bot 可见的信息必须经过记忆插件内的队列化晋升和一致性仲裁。
 
 ## 2. 设计演进脉络
 
@@ -27,7 +27,10 @@ NexusCore 是一个以微内核为基础的个人智能工作台：内核只负�
 内核不理解任何具体业务，不包含笔记渲染、看板拖拽、IM SDK、浏览器实现、工具执行逻辑，也不包含记忆存储、图谱、上下文装配与记忆仲裁。它只提供三类底层原语：
 
 1. **事件、消息与持久化任务队列**：插件之间通过事件解耦。事件分为两类：正确性相关的持久事件（如 `task.state.changed`、`plugin_memory.memory.updated`）必须与状态变更同事务写入 Transactional Outbox，再经持久化 Job Table 按 Consumer Group 投递，支持重投与显式 ack；UI 刷新类尽力而为事件可走内存通道，丢失可容忍（见 6.7）。入站消息、Bot 任务、审核任务和 Agent 任务进入持久化队列，支持重试、租约、死信和顺序分区。所有进入内核的消息必须携带完整因果链并通过统一入口校验（见 6.10）。
-2. **Bot 注册与运行时**：维护 Bot 身份、System Prompt、模型绑定、插件权限与激活方式；内核是 Bot 独立二进制的唯一创建者与监督者，按 `activation_mode`（lazy / resident）激活、健康检查、崩溃重启与回收；Bot 分两族——内核侧 `user_bot / create_bot / monitor_bot / security_bot`，插件侧 `xxx_bot / user_xxx_bot`（见 3.3.1）；lazy Bot 不持有 Bot-Agent 长连接，resident Bot 持有长连接；Bot 通过 gRPC 控制面注册、心跳、拉取任务与订阅事件（见 5.4 / 5.5）。
+2. **Bot 注册、运行时与配置**：维护 Bot 身份、System Prompt、模型绑定、插件权限与激活方式；内核是 Bot 独立二进制的唯一创建者与监督者，按 `activation_mode`（lazy / resident）激活、健康检查、崩溃重启与回收；Bot 分两族——内核侧 `user_bot / create_bot / monitor_bot / security_bot`，插件侧 `xxx_bot / user_xxx_bot`（见 3.3.1）；lazy Bot 不持有 Bot-Agent 长连接，resident Bot 持有长连接；Bot 通过 gRPC 控制面注册、心跳、拉取任务与订阅事件（见 5.4 / 5.5）。
+
+   本原语下包含**配置中心**模块（D-23）：集中存放插件、Bot、Agent 与全局配置的**期望状态**，版本化、可审批、可回滚。配置中心只是控制面的状态存储，不是第四原语；配置写入只经内核配置模块，且必须由 `user_bot` 批准才能生效（见 6.11 与 `doc/ConfigCenter/`）。
+
 3. **跨设备传输路由**：维护 Agent 节点连接池与原生 TCP/UDP 会话，把工具调用路由到对应设备；内核只负责传输、鉴权、多路复用与背压，应用层协议由插件定义（见 5.1）。
 
 以下强业务语义组件不属于内核，必须外置：
@@ -70,21 +73,23 @@ Bot 分两类托管：**内核侧**（hub 进程直接持有角色注册表与�
 
 | 角色 | 托管侧 | 职责 | 拉起关系 |
 | --- | --- | --- | --- |
-| `user_bot` | 内核侧 | 用户席位：常驻投递 / 消息代理的挂点、输入裁决和工作台入口；不持有记忆 | 内核启动时创建（resident） |
-| `create_bot` | 内核侧 | Bot 工厂：阅读内核的 bot 清单与插件清单，按需**拉起相关 Bot 进程**；负责 lazy/resident 状态机与 drain；不持有记忆 | 由 `user_bot` 指令拉起（worker 模式） |
-| `monitor_bot` | 内核侧 | 监督者：滚动检查各 Bot 的存续（进程、心跳、租约、Consumer Group 消费位点），超阈走 Health 链路（6.9）；承担健康报告聚合 | 由 `user_bot` 指令拉起（常驻优先） |
-| `security_bot` | 内核侧 | 插件与 Bot 的安全审查员：**插件注册校验**、插件侧 Bot 注册审查、高危审核（配 3.4）、插件安装后的**热更新安全策略**（隔离运行 + 灰度观察窗） | 常驻；策略只读 + 审计写入 |
-| `xxx_bot`（业务 Bot） | 插件侧 | 业务 bot：命名 `xxx_bot`（如 `architect_bot / pm_bot`）；由承载它的**插件**在安装后向内核注册 bot；记忆需求经 `plugin_memory` 工具申请 | 由 `create_bot` 按插件清单拉起 |
+| `user_bot` | 内核侧 | 用户席位：常驻投递 / 消息代理的挂点、输入裁决和工作台入口；**配置中心的唯一批准人**（审阅 diff、批准/驳回、触发激活），只发控制消息不写库；不持有记忆 | 内核启动时创建（resident） |
+| `create_bot` | 内核侧 | Bot 工厂：读取配置中心的 active 投影（Bot / 插件 / Agent），按需**拉起相关 Bot 进程**；负责 lazy/resident 状态机与 drain；响应 `kernel.config.changed` 触发重载/重启；不持有记忆 | 由 `user_bot` 指令拉起（worker 模式） |
+| `monitor_bot` | 内核侧 | 监督者：滚动检查各 Bot 的存续（进程、心跳、租约、Consumer Group 消费位点）、**插件进程 PID 存活**与**配置版本漂移**，超阈走 Health 链路（6.9）；承担健康报告聚合；只报告不动手（不 kill、不重启、不改配置） | 由 `user_bot` 指令拉起（常驻优先） |
+| `security_bot` | 内核侧 | 插件与 Bot 的安全审查员：**插件注册校验**、插件侧 Bot 注册审查、高危审核（配 3.4）、插件安装后的**热更新安全策略**（隔离运行 + 灰度观察窗）、**配置提案的安全预审**（可执行类：插件/Agent 工具与权限）；只给意见，不批准配置 | 常驻；策略只读 + 审计写入 |
+| `xxx_bot`（业务 Bot） | 插件侧 | 业务 bot：命名 `xxx_bot`（如 `architect_bot / pm_bot`）；由承载它的**插件**在安装后向内核注册 bot；记忆需求经 `plugin_memory` 工具申请；作为 owner bot（`bot_templates[0]`）时还负责拉起 / 回收**插件进程**并上报其 PID | 由 `create_bot` 按插件清单拉起 |
 | `user_xxx_bot`（用户自定义 Bot） | 插件侧 | 用户通过该插件的界面 / 配置自建的 bot，命名加 `user_` 前缀（如 `user_writer_bot`）；默认 `memory_profile=personal_stack_v1`（由 `plugin_memory` 实现） | 由 `create_bot` 按用户清单拉起，安全审查进 `security_bot` |
 
 规则：
 
-1. **唯一创建者仍是内核**：无论内核侧还是插件侧 Bot，进程都由 `create_bot` 经内核 supervisor 机制（5.5）拉起 / 回收；插件只拥有"注册意愿 + 配置"，不直接 `exec`。
+1. **Bot 进程的唯一创建者仍是内核**：无论内核侧还是插件侧 Bot，**Bot 进程**都由 `create_bot` 经内核 supervisor 机制（5.5）拉起 / 回收；插件只拥有"注册意愿 + 配置"，不直接 `exec` Bot。
+   **插件进程是另一级（L2）**：`plugin_manifest.binary` 指定的业务进程由该插件的 owner bot（`bot_templates[0]`）exec 与回收，PID 经 `channel=health` 登记到 `kernel_plugin_processes` 供 `monitor_bot` 巡检。它不是总线主体（无 `bot_id`、无 Consumer Group、不得 `Register`），对外投递仍经 owner bot 的单次投递委托。常规启动 / 优雅关闭 / 崩溃重启由 owner bot 自治；**强制终止与孤儿级联回收仍由 supervisor 执行**。详见 [PluginMvp §6](PluginMvp/PluginMvp详细设计.md)。
 2. 命名即类型：`user_` 前缀仅表示"用户通过插件自建"，不改变 lazy / resident 语义；`user_bot` 保留名，禁止任何插件注册名为 `user_bot` 或带内核保留前缀（`create_/monitor_/security_`）的 bot。
 3. `security_bot` 与 3.4 的凭证 / ACL 体系配合：插件被批准后先注册 `xxx_bot`（与 3.4 的授权记录互查），用户自建 `user_xxx_bot` 时默认走同一套审查；热更新采用"新进程 drain 旧进程"（同 5.5 升级规则），观察期异常即回滚。
 4. **拉起链路：`user_bot → 内核控制面 → create_bot → 各 Bot`**；`create_bot / monitor_bot` 不接受业务消息，仅响应 `user_bot` 与 Health 链路事件。
-5. 插件侧 Bot 同样只有 gRPC 控制面（5.4）一条接入路径；插件本身不持有 Bot 进程，只登记（插件清单 → bot 清单 → create_bot 拉起）。
+5. 插件侧 Bot 同样只有 gRPC 控制面（5.4）一条接入路径；插件本身不持有 Bot 进程，只登记（插件清单 → bot 清单 → create_bot 拉起）。插件进程虽由 owner bot 持有（规则 1），但同样不得绕过 gRPC 控制面与总线直接接入内核。
 6. **记忆不是 Bot 的固有属性**：`memory_profile` 只是插件清单写给内核的声明字段，内核原样存储、不解释；其读取与写入全部由 `plugin_memory` 按其自身 ACL 执行。内核侧四角色不声明、不使用任何记忆 profile。
+7. **配置不是任何 Bot 的私有能力**：配置中心是 hub 模块；`user_bot` 只持有批准权（且审批绑定内容 checksum），`security_bot` 只持有预审意见权，`create_bot / monitor_bot` 只读。任何 Bot 都不得直接写配置表，也不得自批配置。
 
 统一总线规则：用户以 `user_bot` 身份在总线上（客户端插件只是 user_bot 的投递 / 展示代理）；**只有 bot 能投递与消费消息**，内核是各个 bot 之间的消息通道（每 bot 一个 Consumer Group 即其邮箱）。入口适配器（IM / VS Code / 浏览器 / CLI）代 bot 发信，不允许非 bot 主体直入内核。插件（含 `plugin_memory`）不是总线主体，事件必须经其注册的 bot 以单次投递委托投递（见 8.4）。
 
@@ -134,8 +139,9 @@ flowchart LR
 
     subgraph Kernel["NexusCore Kernel / Hub（仅三类原语）"]
         R["插件注册与权限"]
-        BR["Bot 注册与运行时（gRPC）"]
-        Q["持久化队列 / 死信队列 / 入口快速校验"]
+        BR["Bot 注册、运行时与配置（gRPC）"]
+        CF["配置中心 config<br/>（proposal → security → user_bot 批准 → active）"]
+        Q["PostgreSQL 持久队列 / 死信 / 入口校验"]
         OB["Kernel Transactional Outbox（运行表事务）"]
         E["事件总线"]
         A["Agent Mesh 传输路由"]
@@ -153,6 +159,7 @@ flowchart LR
         BL["Lazy Bot（按需，无长连接）"]
         BR2["Resident Bot（常驻，持长连接）"]
         MB["memory_bot（plugin_memory 的总线身份）"]
+        PL2["插件进程 L2（plugin_manifest.binary）<br/>非总线主体，由 owner bot 持有"]
     end
 
     subgraph Audit["安全审核插件（策略外置）"]
@@ -160,8 +167,8 @@ flowchart LR
         HITL["人工确认 HITL"]
     end
 
-    subgraph Stores["存储层（凭据隔离）"]
-        KS["kernel schema（hub 运行表）"]
+    subgraph Stores["存储层（PostgreSQL 单实例 / 凭据隔离）"]
+        KS["kernel schema（hub 运行表 + 配置中心）"]
         MS["memory / vault schema（plugin_memory）"]
     end
 
@@ -172,8 +179,15 @@ flowchart LR
     end
 
     Client -->|IngressEnvelope| Q
+    Client -->|config 提案 / 审批（CLI）| CF
+    CF -->|kernel.config.changed| E
+    CF -.->|active 投影| BR
+    CF -->|config 版本 / 审计| KS
     BR -->|创建 / 激活| BL
     BR -->|创建 / 激活| BR2
+    MB -->|exec / 优雅关闭（owner bot）| PL2
+    PL2 -.->|PID 上报 channel=health| BR
+    BR -.->|强制终止 / 孤儿级联 SIGKILL| PL2
     BL <-->|gRPC（按需）| BR
     BR2 <-->|gRPC（常驻）| BR
     BL -.->|按任务短连接| A
@@ -225,6 +239,8 @@ nexus-core/
 1. **知识服务（Go 二进制）**：图谱事务、金库访问、版本与晋升、审计与本地 Outbox，对外暴露插件工具（5.0）。
 2. **memory-worker（Python，M4）**：Context Assembler、Memory Arbiter、实体抽取 / 蒸馏 / 整合（Auto Dream）。
 3. **`memory_bot`（插件侧 Bot）**：插件在总线上的身份；plugin_memory 的事件经单次投递委托以该 bot 名义回投内核入口。
+
+进程层级：`memory_bot` 是 **Bot 进程（L1）**，由 supervisor exec；知识服务是 **插件进程（L2）**，由 `memory_bot`（owner bot）exec 与回收并上报 PID；memory-worker 是 **L3**，由知识服务自行拉起，内核不登记（见 3.3.1 规则 1 与 PluginMvp §6）。
 
 `plugin_memory` 不是内核数据面：内核不持其 DSN、不建其表、不读其数据、不为其保留任何特殊通道；它与 PM、Obsidian 等插件在接入方式上完全同级，区别只是它更早落地、更复杂。
 
@@ -370,6 +386,7 @@ resident: registered -> starting -> ready -> busy -> draining -> stopped
 7. Agent 故障时，resident 的长连接会断开并重连，在途任务进入 suspended / retry；lazy 没有空闲长连接，Agent 故障由内核心跳与任务租约检测。
 8. 升级采用版本固定 + drain + 切换；resident 在切换后重建长连接，lazy 无长期状态可恢复。
 9. 这不改变 hub 单二进制：hub 仍是单个内核进程，lazy 按需拉起、resident 按类型常驻。
+10. **本节状态机只适用于 Bot 进程（L1）**。插件进程（L2，`plugin_manifest.binary`）不走 lazy / resident 状态机：由 owner bot exec 与回收，状态登记在 `kernel_plugin_processes`，`monitor_bot` 只读巡检；supervisor 对它只做强制终止与孤儿级联回收。任何下线动作的顺序恒为**先插件进程、后 Bot 进程**（见 PluginMvp §6）。
 
 ## 6. 队列与多 Bot 调度
 
@@ -468,33 +485,36 @@ DLQ 需要支持查看原始消息、失败原因、人工修复后重新入队�
 
 ### 6.5 持久化队列实现
 
-早期不引入 Kafka、RabbitMQ 或 NATS，优先使用 MySQL Job Table 和 Transactional Outbox 实现：
+早期不引入 Kafka、RabbitMQ 或 NATS，队列直接建在 PostgreSQL（`kernel` schema）上与 Transactional Outbox 同库实现（D-23）：
 
 ```text
-kernel_jobs
-├── job_id
-├── job_type
-├── queue_name
-├── envelope_id
-├── bot_id
-├── project_id
-├── partition_key
+kernel_jobs（PostgreSQL）
+├── job_id bigint identity
+├── job_type text
+├── queue_name text
+├── envelope_id text
+├── bot_id text
+├── project_id text
+├── partition_key text
 ├── correlation_id   # 业务根因，全链路不变（见 6.8）
 ├── causation_id     # 直接原因，指向父 job / 事件
-├── status
-├── attempt_count
-├── next_retry_at
-├── lease_owner
-├── lease_until
-├── priority
-├── payload_json
-├── result_json
-└── created_at / updated_at
+├── status           # text + CHECK（不用 PG enum，便于演进）
+├── attempt_count int
+├── next_retry_at timestamptz
+├── lease_owner text
+├── lease_until timestamptz
+├── priority int
+├── payload_json jsonb
+├── result_json jsonb
+├── created_at / updated_at timestamptz
+└── INDEX (queue_name, status, next_retry_at, priority)
 ```
 
-配合 `SELECT ... FOR UPDATE SKIP LOCKED` 实现多 worker 抢任务；分区内有序要求调度器不越过同分区未完成的前序任务，`SKIP LOCKED` 仅用于跨分区抢占（见 6.6）。后续规模扩大后，将队列后端抽象为接口，再切换到 NATS JetStream、Redpanda 或 RabbitMQ。
+配合 `SELECT ... FOR UPDATE SKIP LOCKED` 实现多 worker 抢任务；`UPDATE ... RETURNING` 在一次语句内完成认领与租约返回。分区内有序要求调度器不越过同分区未完成的前序任务，`SKIP LOCKED` 仅用于跨分区抢占（见 6.6）。入队事务提交时 `pg_notify('kernel_jobs_wakeup', queue_name)` 即时唤醒调度器；通知不持久，**保留 5-10s 兜底轮询**，崩溃恢复仍以扫描表为准。后续规模扩大后，将队列后端抽象为接口，再切换到 NATS JetStream、Redpanda 或 RabbitMQ。
 
 持久事件投递复用本表：`job_type = event.deliver`，`queue_name = consumer_group_id`，`payload_json` 携带 `event_id` 与事件摘要。出箱与订阅表见 6.7。
+
+运维约束：`kernel_jobs` 为高 churn 表，需 `fillfactor=80` 并调整 autovacuum；`LISTEN` 使用 hub 专用直连，不能经过 PgBouncer 的 transaction pooling。所有租约比较用数据库时钟 `now()`。
 
 ### 6.6 顺序与分区：最小可序
 
@@ -521,6 +541,7 @@ partition_key = conversation_id 或 project_id
 实现与边界：
 
 - 分区内有序要求调度器不越过同分区未完成的前序任务；`SKIP LOCKED` 只允许跨分区抢占。
+- 严格模式（conversation 分区默认）用 `pg_try_advisory_xact_lock(hashtext(queue_name || ':' || partition_key))` 锁定分区队头：拿不到锁即本轮跳过该分区，拿到后检查是否存在更早的非终态任务；宽松模式直接 `SKIP LOCKED`。
 - 任务失败重试时分两种模式：严格模式（前序进入终态前不投递后续，保序但可能队头阻塞）与宽松模式（重试期间后续继续，顺序尽量保持）。conversation 分区默认严格模式。
 - fan-out 生成的多个 Bot 副本各自在组内有序，副本之间互不有序、互不可比。
 - 不得依赖跨组或跨队列的先后关系做正确性判断。
@@ -531,7 +552,7 @@ partition_key = conversation_id 或 project_id
 
 | 事件类别 | 代表事件 | 投递通道 | 投递保证 |
 | --- | --- | --- | --- |
-| 持久事件 | `plugin_memory.memory.updated`、`plugin_memory.memory.invalidated`、`task.state.changed`、审核事件、`plugin_obsidian.note.updated` | Transactional Outbox + 持久化 Job Table | at-least-once，显式 ack，可重投 |
+| 持久事件 | `plugin_memory.memory.updated`、`plugin_memory.memory.invalidated`、`task.state.changed`、审核事件、`plugin_obsidian.note.updated`、`kernel.config.changed` | Transactional Outbox + 持久化 Job Table | at-least-once，显式 ack，可重投 |
 | 尽力而为事件 | `graph.node.highlight`、UI 刷新、动画信号 | 内存 WebSocket Pub/Sub | at-most-once，丢失可容忍 |
 
 正确性相关事件一律使用持久事件；通过尽力而为通道投递正确性事件属于实现错误。
@@ -632,9 +653,11 @@ health_report
 ├── report_id
 ├── source_type        # bot / agent / supervisor
 ├── source_id
-├── target_type        # bot / agent / node / project
+├── target_type        # bot / agent / node / project / plugin_process
 ├── target_id
-├── failure_class      # agent_unreachable / agent_crash / lease_expired / protocol_error / bot_stalled ...
+├── failure_class      # agent_unreachable / agent_crash / lease_expired / protocol_error / bot_stalled
+│                      # / plugin_process_vanished / plugin_process_start_failed / plugin_process_stop_stuck
+│                      # / config_version_drift ...
 ├── severity
 ├── evidence_json
 ├── observed_at
@@ -652,6 +675,8 @@ health_report
 5. 健康事件只提示，不替代 7.4 的版本检查与 job 状态机；任务是否重试、挂起或进入 DLQ 仍由内核 job 状态机决定。
 6. 健康报告投递必须走 6.10 信封（`channel=health`，因果头齐全）；聚合报告以 `incident_id` 为新根（`root_envelope_id`），并在 `evidence_refs[]` 中保留所有源报告的 `report_id` + `correlation_id`；聚合不得丢失单条报告的溯源。
 7. Resident Bot 的 Bot-Agent 长连接断开可作为 Agent 故障的辅助信号；Lazy Bot 没有空闲长连接，Agent 故障只能由 Agent 心跳、任务租约与执行超时判定。
+8. **插件进程（L2）的存续证据也走本链路**：owner bot 以 `target_type=plugin_process` 上报状态变化（事件驱动，不做高频心跳），hub 校验 PID 归属与 `pid_start_time` 后落 `kernel_plugin_processes`；`monitor_bot` 巡检刷新 `last_seen_at` 并按 `plugin_process_*` 聚合告警。`monitor_bot` 与 `user_bot` 都不发 OS 信号：优雅关闭由 owner bot 执行，强制终止与孤儿级联由 supervisor 执行（见 PluginMvp §6.3-6.6）。
+9. **配置版本漂移也是健康证据**：Bot / Agent / 插件进程在注册、心跳与状态上报中携带自己加载的 `config_version`；`monitor_bot` 对比配置中心 active 版本，发现不一致即报 `config_version_drift`，只提示，不自动重载（重载由 create_bot / owner bot 按配置策略执行）。
 
 ### 6.10 全局可追溯与上下文日志
 
@@ -730,11 +755,52 @@ kernel_context_snapshots
 5. 保留策略：审计日志长期保留；上下文快照按项目策略保留，过期只删快照、保留日志与 hash 作为审计墓碑。
 6. 访问控制：审计角色可查全量；用户只能查自己的 trace；Bot 与插件只能查授权项目范围，且查询行为本身也要审计。
 
+### 6.11 配置中心（kernel 控制面模块）
+
+配置中心是「Bot 注册、运行时与配置」原语下的 hub 模块，不是第四原语、不是独立服务，也不是总线主体。它只存控制面的**期望状态**：插件、Bot、Agent 与全局配置；不存业务数据、不存运行时观测状态、不存密钥值。
+
+**配置域**（D-23 范围；每域一个 `default` 配置文档，`config_key` 预留多份配置）：
+
+| scope_type | scope_id | 内容 | 执行者 | 预审 |
+| --- | --- | --- | --- | --- |
+| `plugin` | 每个插件 | 运行参数、开关、资源限制、启用的工具/权限 | 插件进程 L2 / owner bot | 涉及权限或可执行面时 security_bot 预审 |
+| `bot` | 每个 Bot | prompt、模型、activation_mode、memory_profile 声明、工具授权 | bot-runtime | 一般无需预审 |
+| `agent` | 每个 Agent 节点 | 工具白名单、资源限制、project 绑定与策略 | agent-daemon | 涉及工具白名单时 security_bot 预审 |
+| `global` | 固定 `kernel` | 租约、重试、限流、保留期等运行参数 | hub | 一般无需预审 |
+
+**不在范围**：MCP 与 Skill 没有运行时，也未纳入配置中心；如未来引入，须另立设计，不得塞进配置中心充当"配置即运行"。
+
+**manifest 与 config 的边界**：manifest 是不可变安装制品（含 `binary_digest`，由 security_bot 审查）；config 是可变的运行配置（版本化、可回滚）。二者都存于 `kernel` schema，但类型与生命周期不同，不合并成无约束 JSON。
+
+**状态机与审批**：
+
+```text
+draft → proposed → [security_review] → approved → active → retired
+                        └→ rejected
+```
+
+1. 任何被授权的主体（CLI/user_bot、插件、Bot、Agent）可提交 **proposal**；提案不生效。
+2. 可执行类提案（插件权限 / Agent 工具白名单）必须先由 `security_bot` 给出 `approved` 的 `kernel_security_decisions`。
+3. **只有 `user_bot` 可以批准**：批准绑定内容 `checksum`，审批后内容再变则批准失效；`user_bot` 只发控制消息，由配置模块执行激活。
+4. 激活是在一个事务内切换 `active` 版本、写 `kernel.config.changed` 持久事件与审计；回滚生成新提案（内容取旧版本），同样需要批准。
+5. 任何 Bot 不得自批配置；`create_bot / monitor_bot` 只读；`security_bot` 只否决 / 给意见。
+
+**版本与分发**：
+
+- 文档按 `(scope_type, scope_id, config_key)` 单调版本；每个 scope+config_key 同时只有一个 `active`（部分唯一索引保证）。
+- Bot 实例 / Agent 连接 / 插件进程记录自己加载的 `config_version`；任务在领取时固定该版本，执行期间不热插拔。
+- 配置变更只通过 `kernel.config.changed` 事件提示；订阅方收到后拉取新版本，事件不是正确性来源，版本号与 checksum 才是。
+- `monitor_bot` 负责发现 `config_version_drift`，不自动重载。
+
+**密钥**：配置文档只存 `secret_ref`（provider + locator），不存值；hub 不解析、不下发 secret，执行者在本地从环境变量 / 文件 / keyring 解析。
+
+实现级设计见 [`doc/ConfigCenter/ConfigCenter详细设计.md`](ConfigCenter/ConfigCenter详细设计.md)。
+
 ## 7. 记忆模型（plugin_memory 内部）
 
 > 本章描述记忆插件 `plugin_memory` 的内部设计，用于约束其实现与验收。**内核对本章内容一无所知**：不建表、不持有凭据、不装配上下文、不解释数据结构；记忆插件可独立替换或停用，内核行为不变。完整实现级设计见 `doc/MemoryPlugin/MemoryPlugin详细设计.md`。
 
-记忆按 `owner_bot_id` 与 `project_id` 两个维度切分，形成四个象限；象限语义由显式 `visibility` 列表达并由插件库的 CHECK 约束强制（见 8.3）。其中全局公理库物理上位于独立金库 schema `vault`，其余三个象限位于记忆 schema `memory`；两库统一由记忆插件持有与访问。
+记忆按 `owner_bot_id` 与 `project_id` 两个维度切分，形成四个象限；象限语义由显式 `visibility` 列表达并由插件库的 CHECK 约束强制（见 8.3）。其中全局公理库物理上位于独立金库 schema `vault`，其余三个象限位于记忆 schema `memory`；两个 schema 统一由记忆插件持有与访问（同一 PostgreSQL 实例，凭据隔离）。
 
 本章中的 Context Assembler 与 Memory Arbiter 均运行在 `plugin_memory` 内的 memory-worker 认知服务中；它们直接读取插件自己的图谱快照。版本化写入与晋升也由插件执行；内核只承接队列入队、事件投递与审计链路，不接触插件存储。
 
@@ -891,6 +957,7 @@ plugin_memory.memory.invalidated
 | 队列、租约、死信 | 否 | `kernel.kernel_jobs` |
 | 项目、设备绑定 | 否 | `kernel.kernel_projects` |
 | 入口审计、上下文快照、事件出箱 | 否 | `kernel.kernel_ingress_log / kernel_context_snapshots / kernel_event_outbox` |
+| 插件 / Bot / Agent / 全局配置（期望状态、版本、审批） | 否 | `kernel.kernel_config_documents / kernel_config_audit / kernel_secret_refs`（配置中心，D-23） |
 
 知识图谱表（记忆插件 schema，逻辑同名双部署）：
 
@@ -989,7 +1056,7 @@ PM 任务依赖（`blocks`）属于强结构业务数据，由 `pm_task_dependen
 | `project_public` | NULL | 有值 | `memory` | 项目公共记忆 |
 | `ephemeral` | 有值 | 有值 | `memory` | 任务现场或 Bot 项目私有草稿 |
 
-两个 schema 各自用 CHECK 约束锁定允许的象限（MySQL 8.0.16+ 生效），金库不可能混入项目记忆，记忆库也不可能写入全局公理：
+两个 schema 各自用 CHECK 约束锁定允许的象限（PostgreSQL CHECK 生效），金库不可能混入项目记忆，记忆库也不可能写入全局公理：
 
 ```sql
 -- vault schema
@@ -1005,7 +1072,7 @@ ALTER TABLE memory_entities ADD CONSTRAINT chk_memory_visibility CHECK (
 );
 ```
 
-`visibility` 列必须声明为 `NOT NULL`：MySQL 的 CHECK 对 UNKNOWN 结果放行，允许 NULL 会绕过象限约束。
+`visibility` 列必须声明为 `NOT NULL`：CHECK 对 UNKNOWN 结果放行，允许 NULL 会绕过象限约束。
 
 检索索引改为 visibility 优先：
 
@@ -1085,7 +1152,7 @@ memory_external_refs
 └── created_at
 ```
 
-部署节奏：MVP 用同一 MySQL 实例的三个 schema 与多套最小权限账号；`plugin_memory` 从 M3 起是独立二进制进程（与内核分开部署、分开暴露健康检查）。边界稳定后再把金库 schema 迁到独立实例，插件工具 API 不变。
+部署节奏：MVP 用同一 PostgreSQL 实例（database `nexus`）的三个 schema 与多套最小权限角色；`plugin_memory` 从 M3 起是独立二进制进程（与内核分开部署、分开暴露健康检查），使用 `memory` / `vault` 专属角色，hub 角色只有 `kernel` schema 权限。向量检索由插件在 M4 使用 pgvector（侧表），不进入内核；边界稳定后再把金库 schema 迁到独立实例，插件工具 API 不变。
 
 ## 9. 关键业务场景
 
@@ -1159,32 +1226,34 @@ memory_external_refs
 
 | 阶段 | 目标 | 关键交付 |
 | --- | --- | --- |
-| Step 0 | 微内核底座 | hub 三类原语（队列 / 事件、Bot 注册与运行时、传输路由）、插件注册协议（含身份凭证与用户授权订阅，见 3.4）、BotRuntime gRPC 控制面骨架（注册 / 心跳 / 任务流 / 事件订阅，见 5.4）、统一 `IngressEnvelope` 因果校验、`kernel_ingress_log` 与加密上下文快照（见 6.10）、事件总线、持久化 Job Table、内核 Transaction Outbox、最小传输路由（反向 TCP）。**不含任何记忆能力** |
-| Step 1 | Bot 与队列管理 | 四角色骨架落位（`user_bot` 预置常驻，`create_bot / monitor_bot / security_bot` 工厂与监督链路，见 3.3.1）、业务 Bot 注册（插件侧 `xxx_bot / user_xxx_bot`）、配置 Prompt 与模型、Bot 二进制制品与内核 supervisor、lazy / resident 双类型生命周期与激活策略（见 5.5）、插件权限授权与载荷 ACL、健康报告入口与 `monitor_bot` 聚合（见 6.9）、Consumer Group、重试、租约、DLQ、基础审核事件 |
-| Step 2 | 记忆插件与笔记 | `plugin_memory` 作为首个复杂插件落地：knowledge 工具、memory/vault schema、图谱只读视图、Markdown 双链、本地 `.md` 单向发布 + 变更摄取（见 10.3） |
+| Step 0 | 微内核底座 | PostgreSQL 单实例（`kernel / memory / vault` schema 与角色隔离）、hub 三类原语（队列 / 事件、Bot 注册与运行时、传输路由）、**配置中心最小模块**（文档 / 版本 / 只读 active 投影，完整审批在 Step 1）、插件注册协议（含身份凭证与用户授权订阅，见 3.4）、BotRuntime gRPC 控制面骨架（注册 / 心跳 / 任务流 / 事件订阅，见 5.4）、统一 `IngressEnvelope` 因果校验、`kernel_ingress_log` 与加密上下文快照（见 6.10）、事件总线、PG 持久化 Job Table（SKIP LOCKED + LISTEN/NOTIFY）、内核 Transaction Outbox、最小传输路由（反向 TCP）。**不含任何记忆能力** |
+| Step 1 | Bot 与队列管理 | 四角色骨架落位（`user_bot` 预置常驻并承担配置批准，`create_bot / monitor_bot / security_bot` 工厂与监督链路，见 3.3.1）、业务 Bot 注册（插件侧 `xxx_bot / user_xxx_bot`）、**配置中心完整审批流**（proposal → security 预审 → user_bot 批准 → active，CLI）、配置 Prompt 与模型、Bot 二进制制品与内核 supervisor、lazy / resident 双类型生命周期与激活策略（见 5.5）、插件权限授权与载荷 ACL、健康报告入口与 `monitor_bot` 聚合（含配置漂移，见 6.9）、Consumer Group、重试、租约、DLQ、基础审核事件 |
+| Step 2 | 记忆插件与笔记 | `plugin_memory` 作为首个复杂插件落地：knowledge 工具、memory/vault schema（PostgreSQL）、图谱只读视图、Markdown 双链、本地 `.md` 单向发布 + 变更摄取（见 10.3） |
 | Step 3 | 输入通道 | 批注浏览器、VS Code 行内评论、统一业务载荷 `ContextEnvelope` + 通讯信封 `IngressEnvelope`（含完整因果链，见 6.10 / D-19）入口 |
 | Step 4 | Agent Mesh | 原生 TCP/UDP 会话、传输鉴权、插件协议注册与协商、工具 Manifest、健康上报（继承完整因果链）、流式回传、输出蒸馏、HITL 授权 |
-| Step 5 | 记忆闭环 | `plugin_memory` 内 Context Assembler、上下文快照、`version` 乐观锁、版本历史、Memory Arbiter、记忆晋升、失效事件、临时现场清理 |
+| Step 5 | 记忆闭环 | `plugin_memory` 内 Context Assembler、上下文快照、`version` 乐观锁、版本历史、Memory Arbiter、记忆晋升、失效事件、临时现场清理；pgvector 侧表（M4） |
 | Step 6 | 外围业务 | PM 看板、IM 连接器、更多执行器和工具 |
 
 ## 12. 当前必须明确的工程决策
 
-1. **插件内向量能力**：D-11 的向量侧表与 ANN 方案归 `plugin_memory`（M4），内核不关心；若实际环境不支持 `VECTOR`，在插件内做降级（关键词检索），不影响内核。
+1. **插件内向量能力**：D-11 的向量侧表与 ANN 方案归 `plugin_memory`（M4），内核不关心；PostgreSQL 下可用 pgvector 侧表（`memory_embeddings`），不可用则插件内降级为关键词检索，不影响内核。
 2. **图谱查询边界**：memory schema 内复杂图遍历性能需要验证，必要时考虑物化路径或外部图存储；仍是插件内部决策，不应引入 Neo4j。
-3. **插件进程模型（Bot 侧已决策）**：Bot 采用独立二进制、内核创建、懒加载（见 5.5）；后端非 Bot 插件的进程隔离方式与前端插件的模块挂载方式仍待定。
+3. **插件进程模型（已决策）**：Bot 采用独立二进制、内核创建、懒加载（见 5.5）；后端非 Bot 插件采用**两级进程模型**——插件进程（L2）由其 owner bot exec 与回收，PID 登记给 `monitor_bot`，关闭分优雅（`user_bot → owner bot → 插件进程`）与强制（`user_bot → create_bot → supervisor`，越过 owner bot）两条路径（见 3.3.1 规则 1 与 PluginMvp §6）。前端插件的模块挂载方式仍待 M7。
 4. **权限与安全（插件侧已决策）**：插件身份凭证与用户授权订阅见 3.4（含载荷 ACL 与 Agent 可轮换凭证）；插件内部 ACL（如 `plugin_memory` 的三维过滤）由插件自行实现与审计。
 5. **记忆晋升规则**：哪些内容晋升为项目记忆、Bot 经验或直接清理，由 `plugin_memory` 给出可解释判定流程（M4）。
 6. **多端一致性（已决策）**：数据库是 source of truth；Obsidian 文件为单向投影，外部修改经 File Watcher 摄取为信封，由三方合并 / 人工审查冲突流程处理（见 10.3）；PM 状态不与文件同步，仅消费 `plugin_obsidian.note.updated` 等持久事件。
-7. **队列后端边界**：MVP 使用 MySQL Job Table，后续需要确认切换到 NATS、Redpanda 或 RabbitMQ 的触发条件。
+7. **队列后端边界（已决策，D-23）**：MVP 直接使用 PostgreSQL Job Table（SKIP LOCKED + LISTEN/NOTIFY + 兜底轮询），不引入独立消息中间件；后续规模扩大再确认切换到 NATS、Redpanda 或 RabbitMQ 的触发条件。
 8. **多 Bot 冲突裁决**：乐观锁冲突后，哪些内容可以自动合并、哪些必须人工审查，由 `plugin_memory` 按记忆类型定义（M4）。
 9. **队列可观测性**：队列深度、重试率、死信率、Bot 消费延迟、Agent 任务耗时等由内核 `/metrics` 提供；记忆插件指标由插件自己暴露。
-10. **存储分层（已决策，D-22）**：记忆插件持有 `memory` / `vault` schema；内核只持 `kernel` schema 运行表；业务插件只保存 `entity_id` 引用，不按插件分库。
+10. **存储分层（已决策，D-22 / D-23）**：PostgreSQL 单实例单 database `nexus`，`kernel / memory / vault` 三 schema；记忆插件持有 `memory` / `vault`，内核只持 `kernel` 运行表与配置中心；业务插件只保存 `entity_id` 引用，不按插件分库。
 11. **传输层语义**：内核只保证 TCP/UDP 会话与最小传输信封；应用层可靠性、分片、重连与幂等由插件协议承担。MVP 只要求反向 TCP。
 12. **Bot↔Kernel 控制面（已决策）**：gRPC 提供注册、心跳、任务流、事件订阅与凭证续期；Agent 执行协议仍由插件定义（见 5.4）。
 13. **健康报告链路（已决策，D-22 修订）**：报告走统一入口，`monitor_bot` 聚合；内核只做状态迁移与广播（见 6.9）。
 14. **全局可追溯（已决策）**：所有进入内核的消息必须携带 `correlation_id` / `causation_id` / `root_envelope_id` / `causal_path` / `traceparent` 并通过统一校验；日志记录完整结构化上下文与加密快照引用（见 6.10）。
 15. **Bot 运行形态（已决策）**：Bot 是独立二进制，由内核创建、监督与回收；分 lazy 与 resident 两种类型（见 5.5）。
 16. **记忆即插件（已决策，D-22）**：记忆与知识能力完整归 `plugin_memory`（knowledge 类插件）；内核与内核侧四角色不感知记忆；插件仍以独立二进制、独立 schema、独立凭据、独立生命周期运行。
+17. **PostgreSQL 作为内核状态底座（已决策，D-23）**：单 database + 三 schema；持久队列与 Transactional Outbox 同库；LISTEN/NOTIFY 只做唤醒提示，正确性靠表扫描与租约；迁移工具保留自研 `cmd/migrate`，驱动换 `pgx/v5`。
+18. **配置中心（已决策，D-23）**：作为「Bot 注册、运行时与配置」原语下的 hub 模块，非第四原语；四类配置 `plugin / bot / agent / global`；写入必须经 `user_bot` 批准（绑定 checksum），可执行类需 `security_bot` 预审；只存 secret ref，不存密钥值。**MCP 与 Skill 不纳入配置中心**（当前无运行时，后续另立设计）。
 
 ## 13. 最终架构结论
 
@@ -1198,7 +1267,9 @@ NexusCore 的核心竞争力不在某个单一功能，而在于五个统一：
 
 在这五条统一之上，补一条内核边界：hub 只提供队列、路由、注册三类原语；记忆与知识访问属于 `plugin_memory`，上下文装配与记忆仲裁属于插件内的 memory-worker，深度审核策略属于安全插件。这条边界一旦被侵蚀，修正成本会随插件数量线性放大。
 
-存储边界同样不可侵蚀：记忆插件持有 `memory` / `vault` 凭据，内核与业务插件永远不直连知识存储；项目与 Bot 记忆由记忆插件单点持有，不按插件分库。
+存储边界同样不可侵蚀：记忆插件持有 `memory` / `vault` 凭据，内核与业务插件永远不直连知识存储；项目与 Bot 记忆由记忆插件单点持有，不按插件分库。内核只持有 `kernel` schema（运行表 + 配置中心），PostgreSQL 是唯一内核状态底座。
+
+配置边界同样不可侵蚀：配置中心是内核控制面模块，不是第四原语，也不是任何 Bot 的私有能力；配置写入只经配置模块，且必须由 `user_bot` 批准（可执行类先经 `security_bot` 预审）。MCP 与 Skill 无运行时，不进入配置中心。
 
 传输边界同样不可侵蚀：内核只提供 TCP/UDP 会话与最小传输信封，不解释应用层消息；Bot 与 Agent 的语义协议由插件定义，内核不得重新引入 JSON-RPC 或 WebSocket 之类的统一应用层契约。
 
@@ -1241,3 +1312,5 @@ Bot 运行边界同样不可侵蚀：Bot 不是 hub 内嵌协程，而是内核�
 | 2026-11-10 | 新增 `doc/PluginMvp/`：Plugin MVP 实现级详细设计（三类插件形态、manifest schema 冻结、命名与事件规范（G1 收口）、生命周期六态、数据迁移与卸载清理（G4/G5 最小解）、资源限制（G6）、安全链路、冒烟与验收标准）。本文档继续作为上游总设计。 | `doc/PluginMvp/PluginMvp详细设计.md` |
 | 2026-11-11 | 落实知识数据面拆分：hub 收敛为队列 / 事件、Bot 注册与运行时、传输路由三类原语；新增独立 `memory-gateway` 二进制边界，金库 DSN 与记忆库图谱表账号只归 gateway，hub 仅持有内核运行表账号；新增 Gateway 本地 Outbox 与调用方 bot 投递委托。涉及第 1、3.1、3.2、4、7、8.3、8.4、11、12、13 节。 | D-21 |
 | 2026-11-12 | 落实 D-22：**记忆即插件**。撤销 `memory-gateway` 数据面形态，记忆与知识能力（四象限记忆、金库、图谱、版本与晋升、Context Assembler、Memory Arbiter、用户级 Bot 个人记忆）完整归 knowledge 类插件 `plugin_memory`；内核与内核侧四角色不感知记忆；Health 聚合改由 `monitor_bot` 承担；内核 schema 与插件 schema 分离；事件改由插件本地 Outbox 经 `memory_bot` 投递委托回投；图谱表更名 `memory_*`。涉及第 1、3.1、3.2、3.3.1、4、5.2、6.1、6.7、6.8、6.9、7、8、9、10.3、11、12、13 节。 | `doc/NexusCore已修正问题归档.md` D-22 |
+| 2026-11-12 | 收口 12.3 插件进程模型：确立**两级进程模型**——Bot 进程（L1）仍由 `create_bot` 决策、supervisor 执行；插件进程（L2，`plugin_manifest.binary`）由 owner bot（`bot_templates[0]`）exec 与回收，PID 经 `channel=health` 登记到 `kernel_plugin_processes` 供 `monitor_bot` 只读巡检。关闭双路径：优雅（`user_bot → owner bot → 插件进程`，超时 owner bot 自行升级 SIGKILL）与强制（`user_bot → create_bot → supervisor`，越过 owner bot 但执行器仍是内核）；孤儿与 hub 重启由 supervisor 级联回收，顺序恒为先子后父。3.3.1 角色表与规则 1 / 5、5.5 规则 10、6.9 报告字段与规则 8、12.3 同步；BotMvp / PluginMvp / 内核 MVP / AGENTS.md 一并更新。 | `doc/PluginMvp/PluginMvp详细设计.md` §6 |
+| 2026-11-13 | 落实 D-23：**PostgreSQL 内核化 + 配置中心**。PostgreSQL 成为内核唯一状态底座（单 database `nexus` + `kernel / memory / vault` schema；队列 SKIP LOCKED + LISTEN/NOTIFY + 兜底轮询；驱动 pgx/v5）。新增配置中心模块（非第四原语）：`plugin / bot / agent / global` 四类配置，proposal → security_bot 预审（可执行类）→ user_bot 批准（绑定 checksum）→ active，版本化、可回滚、只存 secret ref。内核侧四角色职责同步：user_bot 批准、create_bot 读 active 投影、monitor_bot 观测配置漂移、security_bot 预审。**MCP / Skill 不纳入配置中心**（无运行时，后续另立设计）。涉及第 1、3.1、3.3.1、4、6.5、6.6、6.7、6.9、6.11、8、11、12、13 节。 | `doc/ConfigCenter/ConfigCenter详细设计.md` |

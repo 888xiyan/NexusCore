@@ -1,0 +1,13 @@
+DROP INDEX IF EXISTS kernel_security_subject;
+DROP TABLE IF EXISTS kernel_security_decisions;
+DROP INDEX IF EXISTS kernel_health_target;
+DROP TABLE IF EXISTS kernel_health_reports;
+DROP INDEX IF EXISTS kernel_payloads_envelope;
+DROP TABLE IF EXISTS kernel_payloads;
+DROP TABLE IF EXISTS kernel_context_snapshots;
+DROP INDEX IF EXISTS kernel_ingress_idem;
+DROP INDEX IF EXISTS kernel_ingress_envelope;
+DROP INDEX IF EXISTS kernel_ingress_root;
+DROP INDEX IF EXISTS kernel_ingress_causation;
+DROP INDEX IF EXISTS kernel_ingress_correlation;
+DROP TABLE IF EXISTS kernel_ingress_log;

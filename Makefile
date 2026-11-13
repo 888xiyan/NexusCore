@@ -1,7 +1,7 @@
 BIN_DIR := bin
 PLUGIN_BIN_DIR := bin/plugins
 
-.PHONY: build build-plugins test vet fmt proto migrate-probe migrate-up migrate-down smoke-empty clean
+.PHONY: build build-plugins test test-pg vet fmt proto migrate-probe migrate-up migrate-down smoke-empty smoke-m1 drill-crash-m1 clean
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -20,6 +20,13 @@ build-plugins:
 test:
 	@go test ./...
 
+# 集成测试需要真库：先 scripts/dev-pg.sh 起夹具，再 make test-pg。
+# 未设置 DSN 时集成用例自动跳过（等同 make test）。
+test-pg:
+	@NEXUS_PG_KERNEL_DSN="$${NEXUS_PG_KERNEL_DSN:-postgres://nexus_kernel:nexus_dev_kernel@127.0.0.1:$${NEXUS_DEV_PG_PORT:-55432}/nexus}" \
+	 NEXUS_PG_MIGRATE_DSN="$${NEXUS_PG_MIGRATE_DSN:-postgres://nexus_migrator:nexus_dev_migrate@127.0.0.1:$${NEXUS_DEV_PG_PORT:-55432}/nexus}" \
+	 go test ./...
+
 vet:
 	@go vet ./...
 
@@ -29,26 +36,42 @@ fmt:
 lint: vet
 	@which golangci-lint >/dev/null 2>&1 && golangci-lint run || echo "golangci-lint 未安装，已执行 go vet 兜底"
 
+# proto/gen/v1 下的生成物已提交，普通构建不需要 buf / protoc。
+# 仅在改动 proto/botruntime.proto 后需要重新生成：
+#   go install google.golang.org/protobuf/cmd/protoc-gen-go@latest
+#   go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@latest
+#   go install github.com/bufbuild/buf/cmd/buf@latest
 proto:
-	@which buf >/dev/null 2>&1 && buf generate || echo "buf 未安装：go install github.com/bufbuild/buf/cmd/buf@latest 后重试（M0 占位目标）"
+	@which buf >/dev/null 2>&1 || { echo "buf 未安装：见本目标上方注释的 go install 命令"; exit 1; }
+	@which protoc-gen-go >/dev/null 2>&1 || { echo "protoc-gen-go 未安装"; exit 1; }
+	@which protoc-gen-go-grpc >/dev/null 2>&1 || { echo "protoc-gen-go-grpc 未安装"; exit 1; }
+	buf generate
 
-# 内核库：使用 MYSQL_KERNEL_DSN 指向已运行的 MySQL（8.4 客户端可用，服务端到哪里部署由环境决定；docker-compose 按 M2 排期）。
+# 内核库：使用 NEXUS_PG_KERNEL_DSN（运行角色）指向 PostgreSQL；迁移 DSN 可选（NEXUS_PG_MIGRATE_DSN，未设置时回退运行 DSN）。
 # 插件库（memory / vault）的迁移属于插件 install / upgrade 流程（M2/M3），不走本 Makefile。
 migrate-probe:
-	@if [ -z "$$MYSQL_KERNEL_DSN" ]; then \
-		echo "未设置 MYSQL_KERNEL_DSN：M0 允许跳过；真正的探活在配置 MySQL 后执行"; \
+	@if [ -z "$$NEXUS_PG_KERNEL_DSN" ]; then \
+		echo "未设置 NEXUS_PG_KERNEL_DSN：M0 允许跳过；真正的探活在配置 PostgreSQL 后执行"; \
 		exit 0; \
 	fi
-	@go run ./cmd/migrate -cmd probe -dsn "$$MYSQL_KERNEL_DSN" -dir migrations/kernel
+	@go run ./cmd/migrate -cmd probe -dsn "$${NEXUS_PG_MIGRATE_DSN:-$$NEXUS_PG_KERNEL_DSN}" -dir migrations/kernel
 
 migrate-up:
-	@test -n "$(MYSQL_KERNEL_DSN)" && go run ./cmd/migrate -cmd up -dsn "$(MYSQL_KERNEL_DSN)" -dir migrations/kernel
+	@test -n "$$NEXUS_PG_KERNEL_DSN" && go run ./cmd/migrate -cmd up -dsn "$${NEXUS_PG_MIGRATE_DSN:-$$NEXUS_PG_KERNEL_DSN}" -dir migrations/kernel
 
 migrate-down:
-	@test -n "$(MYSQL_KERNEL_DSN)" && go run ./cmd/migrate -cmd down -dsn "$(MYSQL_KERNEL_DSN)" -dir migrations/kernel
+	@test -n "$$NEXUS_PG_KERNEL_DSN" && go run ./cmd/migrate -cmd down -dsn "$${NEXUS_PG_MIGRATE_DSN:-$$NEXUS_PG_KERNEL_DSN}" -dir migrations/kernel
 
 smoke-empty: migrate-probe
 	@echo "smoke-empty ok（无库环境为跳过模式）"
+
+# M1 验收：九步冒烟链路 + 边界验收 + 兜底轮询（详设 §8.1 / §8.4 / §8.6）
+smoke-m1:
+	@./scripts/smoke-m1.sh
+
+# M1 验收：真实 SIGKILL 崩溃恢复演练（详设 §6.8 / §8.4）
+drill-crash-m1:
+	@./scripts/drill-crash-m1.sh
 
 clean:
 	@rm -rf $(BIN_DIR)

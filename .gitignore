@@ -5,8 +5,8 @@ agent-daemon/dist/
 cli/dist/
 bin/
 
-# 生成代码
-proto/gen/
+# 生成代码：protobuf 生成物按开发规划原则 4 必须进仓库，故不忽略 proto/gen/
+# （buf 未安装时仍可构建；重新生成见 make proto）
 
 # 本地环境与密钥
 .env
