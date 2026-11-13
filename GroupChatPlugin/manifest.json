@@ -1,0 +1,35 @@
+{
+  "plugin_id": "plugin_groupchat",
+  "name": "GroupChat Plugin",
+  "version": "1.0.0",
+  "plugin_type": "workspace",
+  "description": "\u591a Bot \u72ec\u7acb\u7fa4\u804a\u534f\u4f5c\u63d2\u4ef6\uff0c\u4e25\u683c\u6267\u884c\u4ec5\u7528\u6237@\u5524\u9192\u89c4\u5219\uff0c\u675c\u7edd\u7ea7\u8054\u6b7b\u5faa\u73af",
+  "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_groupchat",
+  "publishing": [
+    "plugin_groupchat.message.bot",
+    "plugin_groupchat.room.event"
+  ],
+  "subscribing": [
+    "chat.message.user",
+    "bot.reply"
+  ],
+  "providing_tools": [
+    "groupchat.send_message",
+    "groupchat.get_history"
+  ],
+  "requiring_tools": [],
+  "bot_templates": [
+    {
+      "bot_id": "groupchat_bot",
+      "role": "plugin",
+      "display_name": "GroupChat Bot",
+      "activation_mode": "resident",
+      "capabilities": [
+        "groupchat",
+        "room_management"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "binary_digest": "a45ac1a93c624d57835ad3eb78513c68f60c60bd262a6d66ca8a50ed739816fe"
+}

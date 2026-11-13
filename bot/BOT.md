@@ -60,6 +60,7 @@ bot/
 | 2026-11-13 | qoder | M1 纯内核 MVP 实现 + 验收 + 文档回写 | `migrations/kernel/`、`hub/`（10 模块 + httpapi）、`internal/{envelope,pgtest}`、`bot-runtime/`、`agent-daemon/`、`cli/`、`scripts/`、详设 §10、D-04 归档 | done | commit `3a0e2a6`（79 文件）；详设第 8 节六条全过，真库 test/vet/smoke-m1/drill-crash-m1 全绿 |
 | 2026-11-13 16:50 | antigravity | 修复 M0 审计发现的问题（Makefile 子shell、迁移冲突检测、空指针panic、事务原子性） | `Makefile`、`internal/migrate/`、`cmd/migrate/` | done | M0 审计闭环，单测+构建全绿 |
 | 2026-11-13 17:45 | antigravity | M1 审查缺陷修复（双重凭证TOCTOU、DeadLetter行校验、租约扫描防大事务、Replay原子化、make_interval） | `hub/grpcd/`、`hub/scheduler/`、`hub/ingress/`、`hub/supervisor/` | done | 单测+构建全绿，闭环审查项 |
+| 2026-11-13 21:55 | antigravity | M3 开发完成：内置单体记忆栈（四层+Auto Dream+≤200行约束）+ bot-runtime 简单 Agent 闭环 + GroupChatPlugin 独立开发与只经用户@触发 + 冒烟验收 | `memory/`、`bot-runtime/`、`GroupChatPlugin/`、`hub/`、`scripts/smoke-m3.sh` | done | make test/vet/smoke-m1/smoke-m2/smoke-m3/drill-crash-m1 全绿 |
 
 ## 5. 记忆写入规范
 

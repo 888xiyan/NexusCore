@@ -42,7 +42,7 @@ type API struct {
 	FixtureBinder func(ctx context.Context) error
 }
 
-func (a *API) SetPluginManager(pm *plugin.Manager)     { a.pm = pm }
+func (a *API) SetPluginManager(pm *plugin.Manager)      { a.pm = pm }
 func (a *API) SetSupervisor(sup *supervisor.Supervisor) { a.sup = sup }
 
 func New(st *store.Store, reg *registry.Registry, ing *ingress.Ingress, sched *scheduler.Scheduler,

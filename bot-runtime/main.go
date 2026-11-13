@@ -33,6 +33,7 @@ import (
 	"github.com/888xiyan/NexusCore/internal/envelope"
 	"github.com/888xiyan/NexusCore/internal/osproc"
 	"github.com/888xiyan/NexusCore/internal/version"
+	"github.com/888xiyan/NexusCore/memory"
 	pb "github.com/888xiyan/NexusCore/proto/gen/v1"
 )
 
@@ -48,6 +49,7 @@ func main() {
 		pluginID      = flag.String("plugin-id", "", "所属插件 ID（若为 owner bot 则 exec 插件进程）")
 		pluginBinary  = flag.String("plugin-binary", "", "插件进程独立二进制路径")
 		pluginDigest  = flag.String("plugin-digest", "", "插件进程制品摘要")
+		memoryDir     = flag.String("memory-dir", "", "单体记忆存储基准目录（默认为 data/bots）")
 		showVersion   = flag.Bool("version", false, "打印版本号")
 	)
 	flag.Parse()
@@ -76,17 +78,22 @@ func main() {
 	defer conn.Close()
 	client := pb.NewBotRuntimeClient(conn)
 
+	memMgr := memory.NewManager(*memoryDir)
+	_ = memMgr.EnsureDirs(*botID)
+	injectedMem, _ := memMgr.LoadInjectedContext(*botID)
+
 	b := &bot{
 		id: *botID, cred: cred, client: client, httpBase: "http://" + *hubHTTP,
 		transportAddr: *hubTransport, agentID: *agentID, configVersion: *configVersion,
-		idleTTL: time.Duration(*idleTTL) * time.Second,
+		idleTTL:  time.Duration(*idleTTL) * time.Second,
 		pluginID: *pluginID, pluginBinary: *pluginBinary, pluginDigest: *pluginDigest,
+		memMgr: memMgr, injectedMemory: injectedMem,
 	}
 	if err := b.register(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "Register 失败:", err)
 		os.Exit(1)
 	}
-	fmt.Fprintf(os.Stderr, "bot-runtime %s ready (config_version=%d)\n", b.id, b.configVersion)
+	fmt.Fprintf(os.Stderr, "bot-runtime %s ready (config_version=%d, injected_memory_lines=%d)\n", b.id, b.configVersion, memory.CountLines(b.injectedMemory))
 
 	if b.pluginBinary != "" {
 		if err := b.startPluginProcess(ctx); err != nil {
@@ -124,6 +131,9 @@ type bot struct {
 	pluginID     string
 	pluginBinary string
 	pluginDigest string
+
+	memMgr         *memory.Manager
+	injectedMemory string
 
 	// 独立于任务租约锁：启动、停止、终态报告完全串行，旧代报告成功前不能开新代。
 	pluginMu        sync.Mutex
@@ -212,6 +222,10 @@ func (b *bot) startPluginProcess(ctx context.Context) error {
 		return err
 	}
 	cmd := exec.Command(b.pluginBinary)
+	cmd.Env = append(os.Environ(),
+		"NEXUS_HUB_HTTP="+b.httpBase,
+		supervisor.BotCredentialEnv+"="+b.cred,
+	)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
@@ -465,35 +479,66 @@ func (b *bot) handleTask(ctx context.Context, task *pb.TaskAssignment) error {
 		return b.handlePluginControl(ctx, task)
 	}
 
+	// 简单 Agent 硬约束：单次思考/处理封顶 15 秒，杜绝深度递归 CoT 循环
+	taskCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
 	// 按 payload_ref 自行拉取业务载荷（内核不做上下文水合推送）
 	text := ""
 	if task.PayloadRef != "" {
-		payload, err := b.fetchPayload(ctx, task.PayloadRef)
+		payload, err := b.fetchPayload(taskCtx, task.PayloadRef)
 		if err != nil {
 			return err
 		}
 		var doc struct {
-			Text string `json:"text"`
+			Text    string `json:"text"`
+			Content string `json:"content"`
 		}
 		if err := json.Unmarshal(payload, &doc); err == nil {
-			text = doc.Text
+			if doc.Text != "" {
+				text = doc.Text
+			} else {
+				text = doc.Content
+			}
 		} else {
 			text = string(payload)
 		}
 	}
 
-	// 经 transport 连 loopback agent 执行 echo 工具
-	echoed, err := b.echoViaAgent(ctx, task.JobId, text)
+	// 严禁自身执行 Shell：物理与工具操作统一经 Hub Transport 调度目标 agent 执行
+	echoed, err := b.echoViaAgent(taskCtx, task.JobId, text)
 	if err != nil {
 		return err
 	}
 
-	// 以 reply 信封回投内核（from_bot_id=echo_bot），继承原始根，不新开 trace
-	if err := b.submitReply(ctx, causal, echoed); err != nil {
+	// 组织结构化回复（带 Agent 卡片和记忆上下文，回复仅作纯文本，不级联唤醒）
+	reply := fmt.Sprintf("[%s 响应] 已完成指令处理\n- 状态: 成功\n- 调度 Agent: %s\n- 物理执行结果: %s", b.id, b.agentID, echoed)
+	if b.injectedMemory != "" {
+		reply += fmt.Sprintf("\n- 记忆上下文: 已注入 MEMORY.md (%d 行)", memory.CountLines(b.injectedMemory))
+	}
+
+	// 记录会话流水到 Transcripts 层（Append-Only）
+	if b.memMgr != nil {
+		if err := b.memMgr.RecordTranscript(b.id, memory.TranscriptEntry{
+			SessionID:      causal.CorrelationID,
+			Timestamp:      time.Now(),
+			Role:           "bot",
+			Content:        reply,
+			ToolCall:       b.agentID + ".exec",
+			ToolResult:     echoed,
+			CorrelationID:  causal.CorrelationID,
+			RootEnvelopeID: causal.RootEnvelopeID,
+		}); err != nil {
+			fmt.Fprintf(os.Stderr, "bot %s 记录流水失败: %v\n", b.id, err)
+		}
+	}
+
+	// 以 reply 信封回投内核，继承原始根，不新开 trace
+	if err := b.submitReply(taskCtx, causal, reply); err != nil {
 		return err
 	}
-	_, err = b.client.AckTask(b.callContext(ctx), &pb.AckTaskRequest{
-		JobId: task.JobId, LeaseToken: task.LeaseToken, ResultRef: echoed,
+	_, err = b.client.AckTask(b.callContext(taskCtx), &pb.AckTaskRequest{
+		JobId: task.JobId, LeaseToken: task.LeaseToken, ResultRef: reply,
 	})
 	return err
 }

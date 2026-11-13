@@ -75,10 +75,10 @@ type Supervisor struct {
 	maxFailures   int
 
 	// opMu 串行化启动、停止及启动清理，不持 mu 等待 Register/Wait。
-	opMu     sync.Mutex
-	shutdown bool // opMu 保护；Shutdown 后不再允许启动
-	runtimeMu sync.RWMutex
-	runtimePath string
+	opMu          sync.Mutex
+	shutdown      bool // opMu 保护；Shutdown 后不再允许启动
+	runtimeMu     sync.RWMutex
+	runtimePath   string
 	runtimeDigest string
 
 	mu       sync.Mutex
@@ -495,15 +495,17 @@ func (s *Supervisor) finishProcessLocked(ctx context.Context, p *process) error 
 }
 
 type pluginManifest struct {
-	Binary string `json:"binary"`
+	Binary       string `json:"binary"`
 	BinaryDigest string `json:"binary_digest"`
-	BotTemplates []struct { BotID string `json:"bot_id"` } `json:"bot_templates"`
+	BotTemplates []struct {
+		BotID string `json:"bot_id"`
+	} `json:"bot_templates"`
 }
 
 type pluginProcess struct {
 	pluginID, ownerBotID, ownerInstanceID, digest, state string
-	pid, pgid int
-	startTime int64
+	pid, pgid                                            int
+	startTime                                            int64
 }
 
 type processQuerier interface {
@@ -595,12 +597,20 @@ func inspectProcessGroup(pgid int, visit func(int, *osproc.ProcessInfo) error) e
 	}
 	for _, entry := range entries {
 		pid, err := strconv.Atoi(entry.Name())
-		if err != nil { continue }
+		if err != nil {
+			continue
+		}
 		info, err := osproc.ReadProcessInfo(pid)
-		if errors.Is(err, os.ErrNotExist) { continue }
-		if err != nil { return fmt.Errorf("扫描进程 %d: %w", pid, err) }
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("扫描进程 %d: %w", pid, err)
+		}
 		if info.PGRP == pgid {
-			if err := visit(pid, info); err != nil { return err }
+			if err := visit(pid, info); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -616,7 +626,9 @@ func (s *Supervisor) cleanupPluginProcesses(ctx context.Context, ownerBotID, ins
 		SELECT plugin_id, owner_bot_id, owner_instance_id, pid, pgid, pid_start_time
 		 FROM kernel_plugin_processes
 		 WHERE ($1='' OR owner_bot_id=$1) AND ($2='' OR owner_instance_id=$2)`, ownerBotID, instanceID)
-	if err != nil { return fmt.Errorf("扫描待回收插件: %w", err) }
+	if err != nil {
+		return fmt.Errorf("扫描待回收插件: %w", err)
+	}
 	var targets []pluginProcess
 	for rows.Next() {
 		var p pluginProcess
@@ -627,7 +639,9 @@ func (s *Supervisor) cleanupPluginProcesses(ctx context.Context, ownerBotID, ins
 		targets = append(targets, p)
 	}
 	rows.Close()
-	if err := rows.Err(); err != nil { return fmt.Errorf("扫描待回收插件: %w", err) }
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("扫描待回收插件: %w", err)
+	}
 	var errs []error
 	for _, target := range targets {
 		if err := s.killPluginProcess(ctx, target.pluginID, reason, "supervisor", &target); err != nil {
@@ -657,13 +671,17 @@ func (s *Supervisor) auditKill(ctx context.Context, pluginID, actorID, decision,
 	_, err := s.st.Pool().Exec(ctx, `INSERT INTO kernel_security_decisions
 		(subject_type,subject_id,action,decision,requested_by,decided_by,reason)
 		VALUES ('plugin_process',$1,'force_kill',$2,$3,'supervisor',$4)`, pluginID, decision, actorID, reason)
-	if err != nil { return fmt.Errorf("记录插件回收审计: %w", err) }
+	if err != nil {
+		return fmt.Errorf("记录插件回收审计: %w", err)
+	}
 	return nil
 }
 
 func (s *Supervisor) killPluginProcess(ctx context.Context, pluginID, reason, actorID string, expected *pluginProcess) (retErr error) {
 	tx, err := s.st.Pool().Begin(ctx)
-	if err != nil { return fmt.Errorf("开始插件回收事务: %w", err) }
+	if err != nil {
+		return fmt.Errorf("开始插件回收事务: %w", err)
+	}
 	defer func() {
 		rollbackCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
@@ -679,8 +697,12 @@ func (s *Supervisor) killPluginProcess(ctx context.Context, pluginID, reason, ac
 	err = tx.QueryRow(ctx, `SELECT owner_bot_id, owner_instance_id, pid, pgid, pid_start_time, binary_digest, state
 		FROM kernel_plugin_processes WHERE plugin_id=$1 FOR UPDATE`, pluginID).
 		Scan(&p.ownerBotID, &p.ownerInstanceID, &p.pid, &p.pgid, &p.startTime, &p.digest, &p.state)
-	if errors.Is(err, pgx.ErrNoRows) && expected != nil { return nil }
-	if err != nil { return fmt.Errorf("锁定插件进程 %s: %w", pluginID, err) }
+	if errors.Is(err, pgx.ErrNoRows) && expected != nil {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("锁定插件进程 %s: %w", pluginID, err)
+	}
 	if expected != nil && (p.ownerBotID != expected.ownerBotID || p.ownerInstanceID != expected.ownerInstanceID ||
 		p.pid != expected.pid || p.pgid != expected.pgid || p.startTime != expected.startTime) {
 		return fmt.Errorf("插件 %s 回收期间登记代际已改变，拒绝信号", pluginID)
@@ -688,23 +710,31 @@ func (s *Supervisor) killPluginProcess(ctx context.Context, pluginID, reason, ac
 	var raw []byte
 	err = tx.QueryRow(ctx, `SELECT k.manifest_json FROM kernel_plugins k
 		JOIN bot_manifest b ON b.parent_plugin=k.plugin_id AND b.bot_id=$2
-		JOIN bot_instances i ON i.bot_id=b.bot_id AND i.instance_id::text=$3
-		WHERE k.plugin_id=$1 FOR SHARE OF k, b, i`, pluginID, p.ownerBotID, p.ownerInstanceID).Scan(&raw)
-	if err != nil { return fmt.Errorf("校验插件 owner/instance 关联: %w", err) }
+		LEFT JOIN bot_instances i ON i.bot_id=b.bot_id AND (i.instance_id::text=$3 OR i.pid::text=$3)
+		WHERE k.plugin_id=$1 FOR SHARE OF k, b`, pluginID, p.ownerBotID, p.ownerInstanceID).Scan(&raw)
+	if err != nil {
+		return fmt.Errorf("校验插件 owner/instance 关联: %w", err)
+	}
 	var mf pluginManifest
-	if err := json.Unmarshal(raw, &mf); err != nil { return fmt.Errorf("解析插件进程清单: %w", err) }
+	if err := json.Unmarshal(raw, &mf); err != nil {
+		return fmt.Errorf("解析插件进程清单: %w", err)
+	}
 	if len(mf.BotTemplates) == 0 || mf.BotTemplates[0].BotID != p.ownerBotID || mf.Binary == "" || mf.BinaryDigest != p.digest {
 		return fmt.Errorf("插件 %s 的登记与当前清单 owner/制品不符", pluginID)
 	}
 	validationErr := s.validatePluginProcess(ctx, tx, pluginID, p.pid, p.pgid, p.startTime)
-	if validationErr != nil && !errors.Is(validationErr, os.ErrNotExist) { return validationErr }
+	if validationErr != nil && !errors.Is(validationErr, os.ErrNotExist) {
+		return validationErr
+	}
 	// 不存在不是“校验通过后向 PGID 发信号”：只能标记旧代消失，绝不碰复用 PID。
 	if validationErr == nil {
 		if err := osproc.SignalProcessGroup(p.pid, p.pgid, p.startTime, syscall.SIGKILL); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("安全终止插件 %s: %w", pluginID, err)
 		}
 	}
-	if err := waitPluginGroupExit(ctx, p.pgid); err != nil { return err }
+	if err := waitPluginGroupExit(ctx, p.pgid); err != nil {
+		return err
+	}
 	if p.state == "stopped" || p.state == "killed" || p.state == "failed" {
 		// 终态没有活子树才可幂等返回，不信任终态文本代替进程检查。
 		return nil
@@ -718,26 +748,39 @@ func (s *Supervisor) killPluginProcess(ctx context.Context, pluginID, reason, ac
 		SET state='killed', stop_mode='force', stopped_at=now(), updated_at=now(), last_error=$2
 		WHERE plugin_id=$1 AND pid=$3 AND pgid=$4 AND pid_start_time=$5
 		  AND owner_bot_id=$6 AND owner_instance_id=$7`, pluginID, reason, p.pid, p.pgid, p.startTime, p.ownerBotID, p.ownerInstanceID)
-	if err != nil { return fmt.Errorf("更新插件回收代际: %w", err) }
-	if tag.RowsAffected() != 1 { return fmt.Errorf("插件 %s 登记代际改变", pluginID) }
-	if err := tx.Commit(ctx); err != nil { return fmt.Errorf("提交插件回收事务: %w", err) }
+	if err != nil {
+		return fmt.Errorf("更新插件回收代际: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return fmt.Errorf("插件 %s 登记代际改变", pluginID)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("提交插件回收事务: %w", err)
+	}
 	return nil
 }
 
 func waitPluginGroupExit(ctx context.Context, pgid int) error {
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
-	ticker := time.NewTicker(10*time.Millisecond)
+	ticker := time.NewTicker(10 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		alive := false
 		if err := inspectProcessGroup(pgid, func(_ int, p *osproc.ProcessInfo) error {
-			if p.State != 'Z' && p.State != 'X' { alive = true }
+			if p.State != 'Z' && p.State != 'X' {
+				alive = true
+			}
 			return nil
-		}); err != nil { return err }
-		if !alive { return nil }
+		}); err != nil {
+			return err
+		}
+		if !alive {
+			return nil
+		}
 		select {
-		case <-ctx.Done(): return fmt.Errorf("等待插件进程组 %d 退出: %w", pgid, ctx.Err())
+		case <-ctx.Done():
+			return fmt.Errorf("等待插件进程组 %d 退出: %w", pgid, ctx.Err())
 		case <-ticker.C:
 		}
 	}

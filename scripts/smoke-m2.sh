@@ -151,9 +151,18 @@ if ./bin/cli config approve -hub-http "$HTTP_URL" -credential-file "$RUN_DIR/use
 fi
 echo "  错误 checksum 批准被正确拒绝"
 
-# 6. 正确 checksum 批准
-./bin/cli config approve -hub-http "$HTTP_URL" -credential-file "$RUN_DIR/user_bot.cred" \
-  "$PROP_ID" --checksum "$PROP_CSUM" >/dev/null
+# 6. 正确 checksum 批准 (使用 pty 模拟真实终端交互输入 yes)
+python3 -c "
+import pty, os, subprocess
+master, slave = pty.openpty()
+p = subprocess.Popen(['./bin/cli', 'config', 'approve', '-hub-http', '$HTTP_URL', '-credential-file', '$RUN_DIR/user_bot.cred', '$PROP_ID', '--checksum', '$PROP_CSUM'], stdin=slave, stdout=slave, stderr=slave)
+os.close(slave)
+os.write(master, b'yes\n')
+p.wait()
+os.close(master)
+if p.returncode != 0:
+    exit(1)
+" >/dev/null
 
 # 7. 激活
 ./bin/cli config activate -hub-http "$HTTP_URL" -credential-file "$RUN_DIR/user_bot.cred" "$PROP_ID" >/dev/null

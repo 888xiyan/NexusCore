@@ -13,7 +13,9 @@ NexusCore 是以微内核为基础的个人智能工作台：hub 只做队列 / 
 - **D-22 记忆插件化重构**：完成，commit `65f3901` 已推送（2026-11-12 核对 origin/main 一致）。
 - **D-23 PostgreSQL + 配置中心**：完成，2026-11-13 随 M1 一并提交（`3a0e2a6`；此前长期挂在工作区未提交）。
 - **M1 纯内核 MVP**：**完成**（2026-11-13，commit `3a0e2a6`，79 文件 +13505/−522）。hub 10 模块 + bot-runtime + loopback agent + D-04 四语义 + 失败注入五例；内核 MVP 详设第 8 节六条验收全过，偏离与证据见详设 §10。D-04 已移入已修正归档。
-- **M2 Bot 管理与插件运营**：下一步（配置完整审批流、插件生命周期、权限授权、DLQ 运营、docker-compose、两级进程模型 L2）。
+- **M2 Bot 管理与插件运营**：**完成**（2026-11-13，commit `d569a80` / `8b627bf`）。配置审批全链路、两级进程生命周期、L2 setsid 进程组安全、终端硬约束防注入、DLQ 与 Health 全部通过验收。
+- **M3 内核单体记忆 + GroupChatPlugin 独立开发**：**完成**（2026-11-13）。四层文件系统单体记忆栈（MEMORY.md ≤ 200 行约束 + Transcripts + Notes + Representations + Auto Dream 四阶段整合）；GroupChatPlugin 独立插件编译与仅用户 @ 唤醒铁律（杜绝级联死循环）；简单 Agent 操控 loopback_agent 执行受控检查并汇总结构化卡片；`make smoke-m3` 九步全链路全绿。
+- **M4 Vue 3 前端工作台与多 Bot 群聊实机演示**：下一步。
 - 设计文档已冻结；实现进度详见 `doc/开发规划.md`。
 
 ## 3. 架构记忆（已冻结）
@@ -52,6 +54,9 @@ NexusCore 是以微内核为基础的个人智能工作台：hub 只做队列 / 
 
 ## 5. 踩坑与验证结论
 
+- 2026-11-13 [已验证] **WithKernelRuntimeTx 闭包内严禁手动 tx.Commit**：`WithKernelRuntimeTx` 会在闭包返回 nil 时自动统一 Commit。若闭包内提前执行 Commit 会使外层报错 `tx is closed` 并中断流程 —— 证据: `hub/plugin/plugin.go` `activatePlugin`。
+- 2026-11-13 [已验证] **hub 启动必须显式调用 sup.ConfigureRuntime**：supervisor 依赖固定的可信运行时制品，`hub/main.go` 启动时需传入 `-bot-binary` 并调用 `sup.ConfigureRuntime`，否则插件激活无法取得可信 Bot 二进制 —— 证据: `hub/main.go`。
+- 2026-11-13 [已验证] **GroupChat 路由仅由人类用户 @ 唤醒，Bot 回复中的 @ 恒为空待办**：`room.Append` 严格区分 `role == 'user'` 与 `role == 'bot'`，Bot 回复提取的 @ 仅作纯文本展示，不分发任何任务，彻底杜绝自激死循环 —— 证据: `GroupChatPlugin/room/`、`smoke-m3.sh` 步骤 7。
 - 2026-11-13 [已验证] **租约与超时计算统一使用 PostgreSQL make_interval**：字符串拼接 `($N || ' seconds')::interval` 存在拼装开销与隐患，改用原生 `make_interval(secs => $N)` 并以整数传参更安全可读 —— 证据: `hub/scheduler/`、`hub/supervisor/`。
 - 2026-11-13 [已验证] **DLQ Replay 与人工确认无需多阶段事务**：`ResumeConfirmed` 原生在 `FOR UPDATE` 行锁下单事务支持 `dead` / `suspended` 状态，外层无须先读后挂起，直接委托即可杜绝并发 TOCTOU —— 证据: `hub/scheduler/scheduler.go`、`TestDLQReplayRequiresUserConfirm`。
 - 2026-11-13 [已验证] **流式 RPC 送达后的记账必须脱离流上下文**：`SubscribeEvents` 在 `stream.Send` 成功后若用 `stream.Context()` 做去重登记与 ack，订阅端收到即断开（CLI `-wait` 常态）会让两者随取消失败，任务泄漏在 `leasing` 并被反复重投。改用 `context.WithoutCancel` + 超时 —— 证据: 本轮冒烟由"重复投递旧事件"暴露，修后 `make drill-crash-m1` 三条链路各恰好 1 条 reply。
@@ -70,6 +75,7 @@ NexusCore 是以微内核为基础的个人智能工作台：hub 只做队列 / 
 
 ## 6. 进度日志（新→旧，最近 20 条）
 
+- 2026-11-13 antigravity **M3 开发与全链路验收完成**：实现 Bot 原生单体记忆（Claude Code 四层栈：Transcripts 原始流水、Notes 离散笔记、Representations 主题 Wiki、MEMORY.md ≤ 200 行硬约束与超限截断、Auto Dream 四阶段离线整合）；升级 bot-runtime 为简单 Agent（硬约束：单次思考 ≤ 15s、禁直接执行 Shell、操控 loopback_agent 物理执行并汇总结构化卡片回复）；独立开发 GroupChatPlugin（L2 插件二进制、标准 Manifest、提供 room/mention 模块、严格限制“仅用户 @ 唤醒”，杜绝 Bot 自发级联死循环）；修复 hub `ConfigureRuntime` 初始化与 `activatePlugin` 双重 Commit；新增 `scripts/smoke-m3.sh` 验收闭环。`make test`、`make vet`、`make smoke-m1`、`make smoke-m2`、`make smoke-m3`、`make drill-crash-m1` 全部持续全绿。
 - 2026-11-13 antigravity **M1 审查缺陷修复完成**：消除 grpcd.authenticate 重复凭证校验与 TOCTOU；DeadLetter 增加 RowsAffected 检查；DetectExpiredLeases 单查询合并意图检查并加 LIMIT 100 防大事务；Replay 单事务行锁原子化；StreamTasks 查 bot_manifest 表名对齐；治理错误静默吞没；Deregister 双更新并入事务；Interval 构造统一改用 make_interval(secs => $N)；提炼 enqueueArgs 消除入队样板代码；新增 TestRelease 与 TestDeadLetter 单测，make test/vet/fmt/build 全绿。
 - 2026-11-13 antigravity **M0 审计缺陷修复完成**：修复 Makefile migrate-probe/smoke-empty 子shell导致无库必挂问题；补齐 internal/migrate 同版本不同名称冲突检测与重复脚本检测；消除 rows 为空时的潜在 panic；将迁移执行与 _migrations 记录置于显式事务内保证原子性；优化 cmd/migrate 路径拼接为 filepath.Join 并新增冲突单测。`go test ./...`、`vet`、`make smoke-empty`、`make build` 全绿。
 - 2026-11-13 qoder **M1 纯内核 MVP 完成**（commit `3a0e2a6`，79 文件 +13505/−522）：`migrations/kernel` 七对 DDL + 种子、hub 10 模块（store/registry/config/ingress/scheduler/outbox/eventbus/transport/supervisor/grpcd）+ httpapi 入口网关、bot-runtime echo 夹具、loopback agent、CLI；D-04 四语义 + 失败注入五例；新增 supervisor/registry/transport/eventbus 测试与 `hub/recovery_test.go`；`scripts/dev-pg.sh`、`smoke-m1.sh`、`drill-crash-m1.sh`；详设 §10 回写 8 项偏离 + 六条验收证据；D-04 归档；版本升 `0.1.0-m1`。`go test -count=1 ./...`（真库）/ `vet` / `smoke-m1` / `drill-crash-m1` 全绿。**本次连同此前挂起的 D-23 与两级进程模型文档改动一并提交**；未推送。

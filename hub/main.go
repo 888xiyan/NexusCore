@@ -117,6 +117,11 @@ func run(ctx context.Context, opt options) error {
 	sup := supervisor.New(st, reg, sched, cfg, supervisor.Options{
 		GRPCAddr: opt.grpcAddr, HTTPAddr: opt.httpAddr, TransportAddr: opt.transportAddr, ReconcileInterval: opt.reconcile,
 	})
+	if opt.botBinary != "" {
+		if err := sup.ConfigureRuntime(opt.botBinary); err != nil {
+			return fmt.Errorf("配置 supervisor 可信运行时: %w", err)
+		}
+	}
 	router.OnViolation = func(peer, reason string) {
 		fmt.Fprintf(os.Stderr, "transport 违规 peer=%s: %s\n", peer, reason)
 	}

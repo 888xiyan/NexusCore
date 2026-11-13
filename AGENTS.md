@@ -151,8 +151,8 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 | M0 工程骨架 | 已完成（`c657459`） | D-22 插件化与 D-23 文档重构已落地 |
 | M1 内核 MVP（纯内核） | 已完成 | 详设第 8 节六条验收全过；实现偏离与验收证据见详设 §10 |
 | M2 Bot 管理与插件运营 | 已完成 | PostgreSQL 16+ docker-compose、配置中心完整审批流、Bot 管理、两级进程生命周期、DLQ 与 Health 全部验收通过（`d569a80`） |
-| M3 群聊底座与单体记忆 | 规划中（当前主线） | 完善插件安装规范；内置 Claude Code 式单体记忆栈（≤200行）；独立开发 `GroupChatPlugin`；简单 Agent 操控 Agent 闭环 |
-| M4 Vue 工作台与实机演示 | 规划中 | `Frontend/` Vue 3 前端工程搭建；多 Bot 群聊交互与状态流式展示；多 Bot 操控 Agent 完整实机演练 |
+| M3 群聊底座与单体记忆 | 已完成 | 内置 Claude Code 式四层单体记忆栈（MEMORY.md ≤200行约束 + Auto Dream 离线整合）；独立开发 `GroupChatPlugin`（仅用户@唤醒、防死循环）；简单 Agent 操控 Agent 闭环全链路验收通过 |
+| M4 Vue 工作台与实机演示 | 规划中（当前主线） | `Frontend/` Vue 3 前端工程搭建；多 Bot 群聊交互与状态流式展示；多 Bot 操控 Agent 完整实机演练 |
 | M5+ 跨设备 Mesh 与多模态 | 规划中 | 真实设备 Agent 探针、更多外部通道 |
 
 ## 常见禁忌（先问用户再做）
