@@ -194,3 +194,17 @@ func TestReconcileIdleDoesNotStart(t *testing.T) {
 		t.Fatalf("空队列不应启动 Bot，实际 %d", started)
 	}
 }
+
+func TestRestartBotShutdownAndCanceled(t *testing.T) {
+	sup := New(nil, nil, nil, nil, Options{})
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	if err := sup.RestartBot(ctx, "echo_bot"); err == nil {
+		t.Fatal("expected error with canceled context, got nil")
+	}
+
+	sup.Shutdown()
+	if err := sup.RestartBot(context.Background(), "echo_bot"); err == nil || !strings.Contains(err.Error(), "supervisor 已关闭") {
+		t.Fatalf("expected supervisor shutdown error, got %v", err)
+	}
+}

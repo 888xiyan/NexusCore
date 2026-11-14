@@ -35,14 +35,15 @@ type Registrar interface {
 
 type Server struct {
 	pb.UnimplementedBotRuntimeServer
-	st       *store.Store
-	reg      *registry.Registry
-	ing      *ingress.Ingress
-	sched    *scheduler.Scheduler
-	bus      *eventbus.Bus
-	sup      Registrar
-	leaseTTL time.Duration
-	poll     time.Duration
+	st             *store.Store
+	reg            *registry.Registry
+	ing            *ingress.Ingress
+	sched          *scheduler.Scheduler
+	bus            *eventbus.Bus
+	sup            Registrar
+	leaseTTL       time.Duration
+	poll           time.Duration
+	OnStatusChange func(botID string, status string)
 }
 
 func NewServer(st *store.Store, reg *registry.Registry, ing *ingress.Ingress, sched *scheduler.Scheduler, bus *eventbus.Bus, sup Registrar, leaseTTL, poll time.Duration) *Server {
@@ -127,6 +128,9 @@ func (s *Server) Register(ctx context.Context, req *pb.RegisterRequest) (*pb.Reg
 	}
 	if s.sup != nil {
 		s.sup.MarkRegistered(req.BotId, cv)
+	}
+	if s.OnStatusChange != nil {
+		s.OnStatusChange(req.BotId, "idle")
 	}
 	return &pb.RegisterResponse{Token: cred.Token, TtlSeconds: int64(time.Until(cred.ExpiresAt).Seconds())}, nil
 }
@@ -218,6 +222,9 @@ func (s *Server) StreamTasks(req *pb.StreamTasksRequest, stream pb.BotRuntime_St
 			// 发送失败不 ack：租约到期后由 DetectExpiredLeases 处置
 			return nil
 		}
+		if s.OnStatusChange != nil {
+			s.OnStatusChange(actor.ID, "thinking")
+		}
 	}
 }
 
@@ -246,6 +253,9 @@ func (s *Server) AckTask(ctx context.Context, req *pb.AckTaskRequest) (*pb.AckTa
 			return nil, status.Error(codes.NotFound, err.Error())
 		}
 		return nil, status.Error(codes.Internal, err.Error())
+	}
+	if s.OnStatusChange != nil {
+		s.OnStatusChange(actor.ID, "idle")
 	}
 	return &pb.AckTaskResponse{}, nil
 }

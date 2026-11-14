@@ -56,6 +56,10 @@ make migrate-down   # 执行内核库 down 迁移
 make smoke-empty    # 组合冒烟（M0 为探活模式）
 make test-pg        # 真库全量测试（先 scripts/dev-pg.sh 起夹具；未设 DSN 时集成用例跳过）
 make smoke-m1       # M1 九步冒烟 + 边界验收 + 兜底轮询
+make smoke-m2       # M2 配置审批全链路、Bot 管理与两级进程生命周期冒烟
+make smoke-m3       # M3 单体记忆、简单 Agent 操控与群聊插件闭环冒烟
+make smoke-m4       # M4 11 步端到端全链路冒烟验收（前端构建+网关+群聊+记忆抽屉+Agent监控）
+make launch-m4      # M4 开发者全栈一键启动（Hub:7200 + Agent + GroupChat:7300 + Frontend:5173）
 make drill-crash-m1 # M1 崩溃恢复演练（真实 SIGKILL：hub / Bot / LISTEN）
 make clean          # 清 bin/
 ```
@@ -152,8 +156,9 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 | M1 内核 MVP（纯内核） | 已完成 | 详设第 8 节六条验收全过；实现偏离与验收证据见详设 §10 |
 | M2 Bot 管理与插件运营 | 已完成 | PostgreSQL 16+ docker-compose、配置中心完整审批流、Bot 管理、两级进程生命周期、DLQ 与 Health 全部验收通过（`d569a80`） |
 | M3 群聊底座与单体记忆 | 已完成 | 内置 Claude Code 式四层单体记忆栈（MEMORY.md ≤200行约束 + Auto Dream 离线整合）；独立开发 `GroupChatPlugin`（仅用户@唤醒、防死循环）；简单 Agent 操控 Agent 闭环全链路验收通过 |
-| M4 Vue 工作台与实机演示 | 规划中（当前主线） | `Frontend/` Vue 3 前端工程搭建；多 Bot 群聊交互与状态流式展示；多 Bot 操控 Agent 完整实机演练 |
-| M5+ 跨设备 Mesh 与多模态 | 规划中 | 真实设备 Agent 探针、更多外部通道 |
+| M4 Vue 工作台与实机演示 | 已完成 | `Frontend/` Vue 3 前端工程独立搭建（Vite + Pinia + Element Plus）；Hub HTTP/SSE 网关打通；多 Bot 群聊（严格用户@触发）、Bot 画像与单体记忆抽屉（MEMORY.md ≤200行约束与一键重启）、Agent 实时调度执行监控；端到端自动化验收 `scripts/smoke-m4.sh` 与 `scripts/launch-dev.sh` 全链路通过 |
+| M5 跨设备 Agent Mesh 实真 | 规划中（当前主线） | 真实设备 Agent 探针（反向 TCP、心跳 15s、工具 Manifest 注册）、bash 工具白名单与 HITL 人机协同确认 |
+| M6+ 输入通道与多端连接 | 规划中 | 外部 IM（Telegram/飞书）连接器插件、多端接入 |
 
 ## 常见禁忌（先问用户再做）
 

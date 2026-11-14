@@ -12,8 +12,10 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/888xiyan/NexusCore/hub/config"
@@ -26,7 +28,24 @@ import (
 	"github.com/888xiyan/NexusCore/hub/supervisor"
 	"github.com/888xiyan/NexusCore/hub/transport"
 	"github.com/888xiyan/NexusCore/internal/envelope"
+	"github.com/888xiyan/NexusCore/memory"
+	"github.com/jackc/pgx/v5"
 )
+
+type sseMessage struct {
+	event string
+	data  []byte
+}
+
+type ChatMessage struct {
+	ID        string   `json:"id"`
+	RoomID    string   `json:"room_id"`
+	SenderID  string   `json:"sender_id"`
+	Role      string   `json:"role"` // "user" | "bot" | "system"
+	Content   string   `json:"content"`
+	Mentions  []string `json:"mentions,omitempty"`
+	Timestamp string   `json:"timestamp"`
+}
 
 type API struct {
 	st     *store.Store
@@ -38,16 +57,110 @@ type API struct {
 	router *transport.Router
 	pm     *plugin.Manager
 	sup    *supervisor.Supervisor
+	memMgr *memory.Manager
+
+	// SSE 广播通道
+	sseMu   sync.RWMutex
+	sseSubs map[chan sseMessage]struct{}
+
+	// 房间聊天历史记录 room_id -> []ChatMessage
+	chatMu      sync.RWMutex
+	chatHistory map[string][]ChatMessage
+
 	// FixtureBinder 由 hub 注入，用于 M1 冒烟夹具绑定真实二进制（M2 起由插件 install 取代）
 	FixtureBinder func(ctx context.Context) error
 }
 
 func (a *API) SetPluginManager(pm *plugin.Manager)      { a.pm = pm }
 func (a *API) SetSupervisor(sup *supervisor.Supervisor) { a.sup = sup }
+func (a *API) SetMemoryDir(dir string)                  { a.memMgr = memory.NewManager(dir) }
+
+func (a *API) subscribeSSE() chan sseMessage {
+	ch := make(chan sseMessage, 64)
+	a.sseMu.Lock()
+	a.sseSubs[ch] = struct{}{}
+	a.sseMu.Unlock()
+	return ch
+}
+
+func (a *API) unsubscribeSSE(ch chan sseMessage) {
+	a.sseMu.Lock()
+	delete(a.sseSubs, ch)
+	a.sseMu.Unlock()
+	close(ch)
+}
+
+func (a *API) BroadcastEvent(event string, payload any) {
+	data, err := json.Marshal(payload)
+	if err != nil {
+		return
+	}
+	msg := sseMessage{event: event, data: data}
+	a.sseMu.RLock()
+	defer a.sseMu.RUnlock()
+	for ch := range a.sseSubs {
+		select {
+		case ch <- msg:
+		default:
+			// 慢订阅者跳过，避免阻塞广播
+		}
+	}
+}
+
+func (a *API) BroadcastBotStatus(botID, status string) {
+	a.BroadcastEvent("bot_status", map[string]any{
+		"bot_id":    botID,
+		"status":    status,
+		"timestamp": time.Now().UTC().Format(time.RFC3339),
+	})
+}
+
+func (a *API) BroadcastChatMessage(msg ChatMessage) {
+	a.BroadcastEvent("chat_message", msg)
+}
+
+func (a *API) BroadcastAgentEvent(evt transport.FrameEvent) {
+	a.BroadcastEvent("agent_event", evt)
+}
 
 func New(st *store.Store, reg *registry.Registry, ing *ingress.Ingress, sched *scheduler.Scheduler,
 	cfg *config.Module, disp *outbox.Dispatcher, router *transport.Router) *API {
-	return &API{st: st, reg: reg, ing: ing, sched: sched, cfg: cfg, disp: disp, router: router}
+	api := &API{
+		st:          st,
+		reg:         reg,
+		ing:         ing,
+		sched:       sched,
+		cfg:         cfg,
+		disp:        disp,
+		router:      router,
+		memMgr:      memory.NewManager("data/bots"),
+		sseSubs:     make(map[chan sseMessage]struct{}),
+		chatHistory: make(map[string][]ChatMessage),
+	}
+	if router != nil {
+		router.OnFrame = func(evt transport.FrameEvent) {
+			api.BroadcastAgentEvent(evt)
+			if evt.FrameType == "open" || evt.FrameType == "data_in" {
+				api.BroadcastBotStatus(evt.BotID, "executing")
+			} else if evt.FrameType == "close" {
+				api.BroadcastBotStatus(evt.BotID, "thinking")
+			}
+		}
+	}
+	return api
+}
+
+func (a *API) withCORS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Nexus-Credential")
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (a *API) Handler() http.Handler {
@@ -104,7 +217,16 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/dlq", a.handleDLQList)
 	mux.HandleFunc("POST /v1/dlq/{id}/archive", a.handleDLQArchive)
 
-	return mux
+	// M4: Gateway, SSE, Bot Profile & Memory, Chat Relay
+	mux.HandleFunc("GET /v1/events/stream", a.handleEventsStream)
+	mux.HandleFunc("GET /v1/bots/{bot_id}", a.handleBotGet)
+	mux.HandleFunc("GET /v1/bots/{bot_id}/memory", a.handleBotMemoryGet)
+	mux.HandleFunc("PUT /v1/bots/{bot_id}/memory", a.handleBotMemoryPut)
+	mux.HandleFunc("POST /v1/bots/{bot_id}/restart", a.handleBotRestart)
+	mux.HandleFunc("GET /v1/chat/messages", a.handleChatMessagesGet)
+	mux.HandleFunc("POST /v1/chat/messages", a.handleChatMessagesPost)
+
+	return a.withCORS(mux)
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -189,6 +311,14 @@ func (a *API) handleIngress(w http.ResponseWriter, r *http.Request) {
 			"envelope_id": res.EnvelopeID, "log_id": res.LogID,
 		})
 		return
+	}
+	if env.MsgType == envelope.MsgReply {
+		roomID := env.ChannelRef
+		if roomID == "" {
+			roomID = "dev_room"
+		}
+		a.AppendChatMessage(roomID, env.FromBotID, "bot", string(payload))
+		a.BroadcastBotStatus(env.FromBotID, "idle")
 	}
 	writeJSON(w, http.StatusOK, map[string]any{
 		"decision": res.Decision, "envelope_id": res.EnvelopeID, "log_id": res.LogID,
@@ -1308,4 +1438,301 @@ func (a *API) handleDLQArchive(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"job_id": jobID, "status": "archived"})
+}
+
+// ---------------------- M4: Gateway, SSE, Bot Profile & Memory, Chat Relay ----------------------
+
+func (a *API) handleEventsStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "SSE streaming 不受支持", http.StatusInternalServerError)
+		return
+	}
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	flusher.Flush()
+
+	ch := a.subscribeSSE()
+	defer a.unsubscribeSSE(ch)
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case msg, ok := <-ch:
+			if !ok {
+				return
+			}
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", msg.event, string(msg.data)); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
+	}
+}
+
+func (a *API) handleBotGet(w http.ResponseWriter, r *http.Request) {
+	botID := r.PathValue("bot_id")
+	if botID == "" {
+		writeErr(w, http.StatusBadRequest, "bot_id 不能为空")
+		return
+	}
+	if a.st == nil {
+		writeErr(w, http.StatusServiceUnavailable, "数据库未连接")
+		return
+	}
+	var (
+		role, displayName, actMode string
+		capabilities               json.RawMessage
+		memProfile                 *string
+		promptRef, model           *string
+		cfgVer                     *int64
+		desiredState, obsState     string
+		enabled                    bool
+	)
+	err := a.st.Pool().QueryRow(r.Context(), `
+		SELECT m.role, m.display_name, m.activation_mode, m.capabilities,
+		       m.memory_profile#>>'{}', m.prompt_ref, m.model,
+		       b.config_version, b.desired_state, b.observed_state, b.enabled
+		  FROM bots b
+		  JOIN bot_manifest m ON m.bot_id = b.bot_id
+		 WHERE b.bot_id = $1`, botID).Scan(
+		&role, &displayName, &actMode, &capabilities,
+		&memProfile, &promptRef, &model,
+		&cfgVer, &desiredState, &obsState, &enabled,
+	)
+	if errors.Is(err, pgx.ErrNoRows) {
+		writeErr(w, http.StatusNotFound, fmt.Sprintf("bot %q 不存在", botID))
+		return
+	}
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	content, _ := a.memMgr.LoadInjectedContext(botID)
+	lines := memory.CountLines(content)
+
+	resp := map[string]any{
+		"bot_id":          botID,
+		"role":            role,
+		"display_name":    displayName,
+		"activation_mode": actMode,
+		"capabilities":    capabilities,
+		"desired_state":   desiredState,
+		"observed_state":  obsState,
+		"enabled":         enabled,
+		"memory_lines":    lines,
+		"memory_content":  content,
+	}
+	if memProfile != nil {
+		resp["memory_profile"] = *memProfile
+	}
+	if promptRef != nil {
+		resp["prompt_ref"] = *promptRef
+	}
+	if model != nil {
+		resp["model"] = *model
+	}
+	if cfgVer != nil {
+		resp["config_version"] = *cfgVer
+	}
+	writeJSON(w, http.StatusOK, resp)
+}
+
+func (a *API) handleBotMemoryGet(w http.ResponseWriter, r *http.Request) {
+	botID := r.PathValue("bot_id")
+	if botID == "" {
+		writeErr(w, http.StatusBadRequest, "bot_id 不能为空")
+		return
+	}
+	content, err := a.memMgr.LoadInjectedContext(botID)
+	if err != nil && !errors.Is(err, memory.ErrNotFound) {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	lines := memory.CountLines(content)
+	writeJSON(w, http.StatusOK, map[string]any{
+		"bot_id":        botID,
+		"max_lines":     memory.MaxMemoryLines,
+		"current_lines": lines,
+		"content":       content,
+	})
+}
+
+func (a *API) handleBotMemoryPut(w http.ResponseWriter, r *http.Request) {
+	botID := r.PathValue("bot_id")
+	if botID == "" {
+		writeErr(w, http.StatusBadRequest, "bot_id 不能为空")
+		return
+	}
+	var req struct {
+		Content string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体解析失败: "+err.Error())
+		return
+	}
+	lines := memory.CountLines(req.Content)
+	if lines > memory.MaxMemoryLines {
+		writeErr(w, http.StatusBadRequest, "单体记忆 MEMORY.md 超过 200 行硬约束限制")
+		return
+	}
+	if err := a.memMgr.SaveInjectedContext(botID, req.Content); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "saved",
+		"lines":  lines,
+	})
+}
+
+func (a *API) handleBotRestart(w http.ResponseWriter, r *http.Request) {
+	botID := r.PathValue("bot_id")
+	if botID == "" {
+		writeErr(w, http.StatusBadRequest, "bot_id 不能为空")
+		return
+	}
+	if a.sup == nil {
+		writeErr(w, http.StatusServiceUnavailable, "supervisor 未就绪")
+		return
+	}
+	if err := a.sup.RestartBot(r.Context(), botID); err != nil {
+		writeErr(w, http.StatusInternalServerError, fmt.Sprintf("重启 Bot %s 失败: %v", botID, err))
+		return
+	}
+	a.BroadcastBotStatus(botID, "idle")
+	writeJSON(w, http.StatusOK, map[string]any{
+		"status": "restarted",
+		"bot_id": botID,
+	})
+}
+
+func (a *API) handleChatMessagesGet(w http.ResponseWriter, r *http.Request) {
+	roomID := r.URL.Query().Get("room_id")
+	if roomID == "" {
+		roomID = "dev_room"
+	}
+	a.chatMu.RLock()
+	msgs := a.chatHistory[roomID]
+	if msgs == nil {
+		msgs = []ChatMessage{}
+	}
+	copied := make([]ChatMessage, len(msgs))
+	copy(copied, msgs)
+	a.chatMu.RUnlock()
+
+	writeJSON(w, http.StatusOK, map[string]any{
+		"room_id":  roomID,
+		"messages": copied,
+	})
+}
+
+var botMentionRegex = regexp.MustCompile(`@([a-z0-9_]{5,64})\b`)
+
+func extractMentions(text string) []string {
+	matches := botMentionRegex.FindAllStringSubmatch(text, -1)
+	if len(matches) == 0 {
+		return []string{}
+	}
+	seen := make(map[string]bool)
+	var res []string
+	for _, m := range matches {
+		if len(m) > 1 && !seen[m[1]] {
+			seen[m[1]] = true
+			res = append(res, m[1])
+		}
+	}
+	return res
+}
+
+func (a *API) AppendChatMessage(roomID, senderID, role, content string) ChatMessage {
+	if roomID == "" {
+		roomID = "dev_room"
+	}
+	if senderID == "" {
+		senderID = "user"
+	}
+	if role == "" {
+		role = "user"
+	}
+	mentions := extractMentions(content)
+	msg := ChatMessage{
+		ID:        fmt.Sprintf("msg_%d", time.Now().UnixNano()),
+		RoomID:    roomID,
+		SenderID:  senderID,
+		Role:      role,
+		Content:   content,
+		Mentions:  mentions,
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+	}
+
+	a.chatMu.Lock()
+	a.chatHistory[roomID] = append(a.chatHistory[roomID], msg)
+	if len(a.chatHistory[roomID]) > 100 {
+		a.chatHistory[roomID] = a.chatHistory[roomID][len(a.chatHistory[roomID])-100:]
+	}
+	a.chatMu.Unlock()
+
+	a.BroadcastChatMessage(msg)
+	return msg
+}
+
+func (a *API) handleChatMessagesPost(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		RoomID   string `json:"room_id"`
+		SenderID string `json:"sender_id"`
+		Role     string `json:"role"`
+		Content  string `json:"content"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "解析请求体失败: "+err.Error())
+		return
+	}
+	if strings.TrimSpace(req.Content) == "" {
+		writeErr(w, http.StatusBadRequest, "消息内容不能为空")
+		return
+	}
+	if req.RoomID == "" {
+		req.RoomID = "dev_room"
+	}
+	if req.SenderID == "" {
+		req.SenderID = "user"
+	}
+	if req.Role == "" {
+		req.Role = "user"
+	}
+
+	msg := a.AppendChatMessage(req.RoomID, req.SenderID, req.Role, req.Content)
+
+	// 核心安全铁律：仅当 role == "user" 时提取到的 @bot 才会唤醒下游 Bot
+	if req.Role == "user" && len(msg.Mentions) > 0 && a.ing != nil {
+		cred := r.Header.Get("X-Nexus-Credential")
+		if cred == "" && a.reg != nil {
+			issued, err := a.reg.IssueCredential(r.Context(), config.KindBot, config.UserBot)
+			if err == nil {
+				cred = issued.Token
+			}
+		}
+		for _, targetBot := range msg.Mentions {
+			idempotencyKey := fmt.Sprintf("chat_%s_%s", msg.ID, targetBot)
+			env := envelope.NewRoot(config.UserBot, envelope.ChannelIM, envelope.MsgRequest, idempotencyKey)
+			env.CorrelationID = msg.ID
+			env.ChannelRef = req.RoomID
+			route := ingress.Route{
+				QueueName:    targetBot,
+				BotID:        targetBot,
+				JobType:      "chat.task",
+				PartitionKey: req.RoomID,
+			}
+			_, _ = a.ing.Submit(r.Context(), env, cred, []byte(req.Content), route)
+			a.BroadcastBotStatus(targetBot, "thinking")
+		}
+	}
+
+	writeJSON(w, http.StatusOK, msg)
 }

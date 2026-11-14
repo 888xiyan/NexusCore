@@ -1,7 +1,7 @@
 BIN_DIR := bin
 PLUGIN_BIN_DIR := bin/plugins
 
-.PHONY: build build-plugins test test-pg vet fmt proto migrate-probe migrate-up migrate-down compose-up compose-down smoke-empty smoke-m1 smoke-m2 smoke-m3 drill-crash-m1 clean
+.PHONY: build build-plugins test test-pg vet fmt proto migrate-probe migrate-up migrate-down compose-up compose-down smoke-empty smoke-m1 smoke-m2 smoke-m3 smoke-m4 launch-m4 drill-crash-m1 clean
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -96,6 +96,14 @@ smoke-m2:
 # M3 验收：GroupChatPlugin 插件生命周期、仅用户@触发路由、简单 Agent 操控 loopback_agent、Claude Code 单体记忆与防死循环闭环
 smoke-m3:
 	@./scripts/smoke-m3.sh
+
+# M4 验收：Vue 3 前端工作台构建、多 Bot 群聊交互、单体记忆抽屉编辑与重启、Agent 实时监控与端到端实机演练
+smoke-m4:
+	@./scripts/smoke-m4.sh
+
+# M4 实机启动：一键启动微内核网关、群聊插件、受控探针与 Vue 3 前端工作台
+launch-m4:
+	@./scripts/launch-dev.sh
 
 # M1 验收：真实 SIGKILL 崩溃恢复演练（详设 §6.8 / §8.4）
 drill-crash-m1:

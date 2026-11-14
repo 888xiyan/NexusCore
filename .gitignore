@@ -24,6 +24,8 @@ doc/evidence/local/
 # 前端
 workbench/node_modules/
 workbench/dist/
+Frontend/node_modules/
+Frontend/dist/
 
 # 编辑器与系统
 .idea/

@@ -140,7 +140,11 @@ func run(ctx context.Context, opt options) error {
 	mon := monitor.New(st, sup, cfg, 5*time.Second)
 
 	gs := grpc.NewServer()
-	grpcd.NewServer(st, reg, ing, sched, bus, sup, scheduler.DefaultLeaseTTL, 200*time.Millisecond).RegisterService(gs)
+	grpcdServer := grpcd.NewServer(st, reg, ing, sched, bus, sup, scheduler.DefaultLeaseTTL, 200*time.Millisecond)
+	grpcdServer.OnStatusChange = func(botID string, status string) {
+		api.BroadcastBotStatus(botID, status)
+	}
+	grpcdServer.RegisterService(gs)
 
 	grpcLn, err := net.Listen("tcp", opt.grpcAddr)
 	if err != nil {

@@ -128,3 +128,32 @@ func TestMultipleFramesInSequence(t *testing.T) {
 		t.Fatalf("读尽后应为 EOF，实际 %v", err)
 	}
 }
+
+func TestRouterOnFrameCallback(t *testing.T) {
+	rt := NewRouter(nil, nil)
+	var captured []FrameEvent
+	rt.OnFrame = func(evt FrameEvent) {
+		captured = append(captured, evt)
+	}
+
+	testEvt := FrameEvent{
+		StreamID:   10,
+		JobID:      "job_100",
+		BotID:      "ops_bot",
+		AgentID:    "loopback_agent",
+		ProtocolID: "nexus.echo.v1",
+		FrameType:  "open",
+		Status:     "running",
+		Payload:    "open request",
+		ElapsedMS:  0,
+		Timestamp:  "2026-11-14T04:00:00Z",
+	}
+	rt.emitFrame(testEvt)
+
+	if len(captured) != 1 {
+		t.Fatalf("expected 1 captured event, got %d", len(captured))
+	}
+	if captured[0].StreamID != 10 || captured[0].FrameType != "open" || captured[0].BotID != "ops_bot" {
+		t.Fatalf("unexpected captured event: %+v", captured[0])
+	}
+}

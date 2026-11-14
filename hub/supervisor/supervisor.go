@@ -257,6 +257,43 @@ func verifyDigest(path, want string) error {
 func (s *Supervisor) Start(ctx context.Context, botID string) error {
 	s.opMu.Lock()
 	defer s.opMu.Unlock()
+	return s.startLocked(ctx, botID)
+}
+
+// RestartBot 优雅重启指定 Bot 进程：终止旧进程 → 回收 L2 插件进程 → 重新拉起新实例。
+func (s *Supervisor) RestartBot(ctx context.Context, botID string) error {
+	s.opMu.Lock()
+	defer s.opMu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	if s.shutdown {
+		return errors.New("supervisor 已关闭，拒绝重启 Bot")
+	}
+
+	s.mu.Lock()
+	p, running := s.procs[botID]
+	if running {
+		p.stopping = true
+	}
+	s.mu.Unlock()
+
+	if running {
+		s.stopProcess(botID, p, "manual_restart")
+		if err := s.finishProcess(ctx, p); err != nil {
+			return fmt.Errorf("清理旧代 Bot %s: %w", botID, err)
+		}
+	}
+
+	s.mu.Lock()
+	delete(s.backoff, botID)
+	delete(s.failures, botID)
+	s.mu.Unlock()
+
+	return s.startLocked(ctx, botID)
+}
+
+func (s *Supervisor) startLocked(ctx context.Context, botID string) error {
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -928,6 +965,10 @@ func (s *Supervisor) Run(ctx context.Context) error {
 
 // Shutdown 回收自己拉起的全部 Bot 进程（先子后父顺序由调用方保证）。
 func (s *Supervisor) Shutdown() {
+	s.opMu.Lock()
+	s.shutdown = true
+	s.opMu.Unlock()
+
 	s.mu.Lock()
 	procs := make([]*process, 0, len(s.procs))
 	for _, p := range s.procs {

@@ -53,6 +53,20 @@ type Frame struct {
 	Payload         []byte `json:"-"`
 }
 
+// FrameEvent 是传输层向监控与总线广播的帧事件。
+type FrameEvent struct {
+	StreamID   uint32 `json:"stream_id"`
+	JobID      string `json:"job_id"`
+	BotID      string `json:"bot_id"`
+	AgentID    string `json:"agent_id"`
+	ProtocolID string `json:"protocol_id"`
+	FrameType  string `json:"frame_type"` // open | data_in | data_out | close
+	Status     string `json:"status"`     // running | completed | error
+	Payload    string `json:"payload"`
+	ElapsedMS  int64  `json:"elapsed_ms"`
+	Timestamp  string `json:"timestamp"`
+}
+
 type frameHeader struct {
 	ProtocolID      string `json:"protocol_id,omitempty"`
 	ProtocolVersion uint16 `json:"protocol_version,omitempty"`
@@ -129,6 +143,9 @@ type stream struct {
 	botConn    string
 	agentConn  string
 	jobID      string
+	botID      string
+	agentID    string
+	startTime  time.Time
 }
 
 type session struct {
@@ -157,6 +174,14 @@ type Router struct {
 	nextConn uint64
 	// OnViolation 记录协议违规审计（由 hub 接到 ingress / 日志）
 	OnViolation func(peer, reason string)
+	// OnFrame 广播传输帧事件（由 hub 转发至 SSE 及 Agent 监控面板）
+	OnFrame func(evt FrameEvent)
+}
+
+func (rt *Router) emitFrame(evt FrameEvent) {
+	if rt.OnFrame != nil {
+		rt.OnFrame(evt)
+	}
 }
 
 func NewRouter(st *store.Store, reg *registry.Registry) *Router {
@@ -291,7 +316,16 @@ func (rt *Router) openStream(sess *session, f Frame) error {
 	}
 	id := rt.nextID
 	rt.nextID++
-	st := &stream{id: id, protocolID: req.ProtocolID, botConn: sess.connID, agentConn: agentSess.connID, jobID: req.JobID}
+	st := &stream{
+		id:         id,
+		protocolID: req.ProtocolID,
+		botConn:    sess.connID,
+		agentConn:  agentSess.connID,
+		jobID:      req.JobID,
+		botID:      sess.peer.ID,
+		agentID:    agentSess.peer.ID,
+		startTime:  time.Now(),
+	}
 	rt.streams[id] = st
 	rt.mu.Unlock()
 
@@ -299,7 +333,22 @@ func (rt *Router) openStream(sess *session, f Frame) error {
 		return err
 	}
 	// 通知 Agent 侧建立对应逻辑流
-	return agentSess.send(Frame{FrameType: FrameOpen, StreamID: id, ProtocolID: req.ProtocolID, Payload: f.Payload})
+	if err := agentSess.send(Frame{FrameType: FrameOpen, StreamID: id, ProtocolID: req.ProtocolID, Payload: f.Payload}); err != nil {
+		return err
+	}
+	rt.emitFrame(FrameEvent{
+		StreamID:   id,
+		JobID:      st.jobID,
+		BotID:      st.botID,
+		AgentID:    st.agentID,
+		ProtocolID: st.protocolID,
+		FrameType:  "open",
+		Status:     "running",
+		Payload:    string(f.Payload),
+		ElapsedMS:  0,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+	})
+	return nil
 }
 
 func (rt *Router) route(sess *session, f Frame) error {
@@ -314,20 +363,40 @@ func (rt *Router) route(sess *session, f Frame) error {
 		return fmt.Errorf("%w: 流 %d 绑定 %s，收到 %s", ErrProtocolDenied, st.id, st.protocolID, f.ProtocolID)
 	}
 	var target *session
+	var frameType string
 	if sess.connID == st.botConn {
 		target = rt.sessions[st.agentConn]
+		frameType = "data_in"
 	} else if sess.connID == st.agentConn {
 		target = rt.sessions[st.botConn]
+		frameType = "data_out"
 	} else {
 		rt.mu.Unlock()
 		return fmt.Errorf("%w: 会话不属于流 %d", ErrStreamUnknown, st.id)
 	}
+	elapsed := time.Since(st.startTime).Milliseconds()
+	stCopy := *st
 	rt.mu.Unlock()
 	if target == nil {
 		return fmt.Errorf("%w: 流 %d 对端已断开", ErrPeerUnavailable, st.id)
 	}
 	// 原样转发 payload，内核不解析
-	return target.send(Frame{ProtocolID: st.protocolID, StreamID: st.id, FrameType: f.FrameType, Payload: f.Payload})
+	if err := target.send(Frame{ProtocolID: stCopy.protocolID, StreamID: stCopy.id, FrameType: f.FrameType, Payload: f.Payload}); err != nil {
+		return err
+	}
+	rt.emitFrame(FrameEvent{
+		StreamID:   stCopy.id,
+		JobID:      stCopy.jobID,
+		BotID:      stCopy.botID,
+		AgentID:    stCopy.agentID,
+		ProtocolID: stCopy.protocolID,
+		FrameType:  frameType,
+		Status:     "running",
+		Payload:    string(f.Payload),
+		ElapsedMS:  elapsed,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+	})
+	return nil
 }
 
 func (rt *Router) closeStream(sess *session, streamID uint32) error {
@@ -339,14 +408,28 @@ func (rt *Router) closeStream(sess *session, streamID uint32) error {
 	}
 	delete(rt.streams, streamID)
 	bot, agent := rt.sessions[st.botConn], rt.sessions[st.agentConn]
+	elapsed := time.Since(st.startTime).Milliseconds()
+	stCopy := *st
 	rt.mu.Unlock()
-	closeFrame := Frame{FrameType: FrameClose, StreamID: streamID, ProtocolID: st.protocolID}
+	closeFrame := Frame{FrameType: FrameClose, StreamID: streamID, ProtocolID: stCopy.protocolID}
 	if bot != nil && bot.connID != sess.connID {
 		_ = bot.send(closeFrame)
 	}
 	if agent != nil && agent.connID != sess.connID {
 		_ = agent.send(closeFrame)
 	}
+	rt.emitFrame(FrameEvent{
+		StreamID:   stCopy.id,
+		JobID:      stCopy.jobID,
+		BotID:      stCopy.botID,
+		AgentID:    stCopy.agentID,
+		ProtocolID: stCopy.protocolID,
+		FrameType:  "close",
+		Status:     "completed",
+		Payload:    "",
+		ElapsedMS:  elapsed,
+		Timestamp:  time.Now().UTC().Format(time.RFC3339),
+	})
 	return nil
 }
 
@@ -372,7 +455,21 @@ func (rt *Router) closeSession(connID, reason string) {
 	rt.mu.Unlock()
 	// 本连接所有 stream 按协议错误关闭，不影响其他插件与内核
 	for i, st := range affected {
-		_ = peers[i].send(Frame{FrameType: FrameClose, StreamID: st.id, ProtocolID: st.protocolID, Payload: []byte(reason)})
+		if i < len(peers) && peers[i] != nil {
+			_ = peers[i].send(Frame{FrameType: FrameClose, StreamID: st.id, ProtocolID: st.protocolID, Payload: []byte(reason)})
+		}
+		rt.emitFrame(FrameEvent{
+			StreamID:   st.id,
+			JobID:      st.jobID,
+			BotID:      st.botID,
+			AgentID:    st.agentID,
+			ProtocolID: st.protocolID,
+			FrameType:  "close",
+			Status:     "completed",
+			Payload:    reason,
+			ElapsedMS:  time.Since(st.startTime).Milliseconds(),
+			Timestamp:  time.Now().UTC().Format(time.RFC3339),
+		})
 	}
 }
 
