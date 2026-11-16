@@ -31,5 +31,20 @@
     }
   ],
   "schema_version": 1,
+  "ui": {
+    "menu": {
+      "title": "群聊协同工作台",
+      "icon": "ChatDotRound",
+      "path": "/groupchat",
+      "order": 1
+    },
+    "routes": [
+      {
+        "path": "/groupchat",
+        "name": "GroupChatWorkspace",
+        "entry": "/plugins/groupchat/dist/index.js"
+      }
+    ]
+  },
   "binary_digest": "1bfd15b00c3ec73d650d9848fb67344b8eea9a6f5ec16df07a98dd3b705f8d73"
 }

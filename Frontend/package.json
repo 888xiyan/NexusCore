@@ -9,16 +9,17 @@
     "preview": "vite preview --port 5173"
   },
   "dependencies": {
-    "vue": "^3.4.21",
-    "pinia": "^2.1.7",
-    "element-plus": "^2.6.1",
     "@element-plus/icons-vue": "^2.3.1",
+    "element-plus": "^2.6.1",
+    "highlight.js": "^11.9.0",
     "markdown-it": "^14.1.0",
-    "highlight.js": "^11.9.0"
+    "pinia": "^2.1.7",
+    "vue": "^3.4.21",
+    "vue-router": "^4.6.5"
   },
   "devDependencies": {
-    "@vitejs/plugin-vue": "^5.0.4",
     "@types/markdown-it": "^14.1.1",
+    "@vitejs/plugin-vue": "^5.0.4",
     "typescript": "^5.4.2",
     "vite": "^5.1.6"
   }
