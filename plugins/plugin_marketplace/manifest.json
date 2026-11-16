@@ -1,0 +1,54 @@
+{
+  "plugin_id": "plugin_marketplace",
+  "name": "Nexus Marketplace & Approval Plugin",
+  "version": "1.0.0",
+  "plugin_type": "workspace",
+  "description": "插件商场浏览检索、下载 SHA256 强校验、安装 Tier 2 HITL 审批与逆拓扑级联卸载三阶段闭环插件",
+  "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_marketplace",
+  "publishing": [
+    "plugin_marketplace.plugin.downloaded",
+    "plugin_marketplace.plugin.approved",
+    "plugin_marketplace.plugin.uninstalled"
+  ],
+  "subscribing": [
+    "marketplace.command.install",
+    "marketplace.command.uninstall"
+  ],
+  "providing_tools": [
+    "marketplace.search",
+    "marketplace.download_stage",
+    "marketplace.install_proposal",
+    "marketplace.uninstall_cascade"
+  ],
+  "requiring_tools": [],
+  "bot_templates": [
+    {
+      "bot_id": "marketplace_bot",
+      "role": "plugin",
+      "display_name": "Marketplace Bot",
+      "activation_mode": "resident",
+      "capabilities": [
+        "plugin_discovery",
+        "approval_orchestration",
+        "dag_inspection"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "ui": {
+    "menu": {
+      "title": "插件商场与审批",
+      "icon": "Shop",
+      "path": "/marketplace",
+      "order": 5
+    },
+    "routes": [
+      {
+        "path": "/marketplace",
+        "name": "Marketplace",
+        "entry": "/plugins/marketplace/dist/index.js"
+      }
+    ]
+  },
+  "binary_digest": "2c5ea8f270b119c6b2d25716dbb56cd59029372af1710c630331f9fd3689f09a"
+}

@@ -34,6 +34,8 @@ pluginRegistry.setRouter(router)
 pluginRegistry.registerBuiltIn('plugin_groupchat', () => import('./plugins/groupchat'))
 pluginRegistry.registerBuiltIn('plugin_agent_discovery', () => import('./plugins/agent-discovery'))
 pluginRegistry.registerBuiltIn('plugin_bot_creator', () => import('./plugins/bot-creator'))
+pluginRegistry.registerBuiltIn('plugin_tool_center', () => import('./plugins/tool-center'))
+pluginRegistry.registerBuiltIn('plugin_marketplace', () => import('./plugins/marketplace'))
 
 // 4. 异步初始化微插件中心并挂载应用
 async function bootstrap() {

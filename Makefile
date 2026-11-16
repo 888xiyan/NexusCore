@@ -126,6 +126,10 @@ smoke-m8:
 smoke-m9:
 	@./scripts/smoke-m9.sh
 
+# M10 验收：工具中心、MCP/Skill 插件化治理与中台 Bot 审批闭环
+smoke-m10:
+	@./scripts/smoke-m10.sh
+
 # M4 实机启动：一键启动微内核网关、群聊插件、受控探针与 Vue 3 前端工作台
 launch-m4:
 	@./scripts/launch-dev.sh

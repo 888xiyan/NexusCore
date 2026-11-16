@@ -20,6 +20,7 @@ import {
   Tools,
   Plus,
   Search,
+  Shop,
 } from '@element-plus/icons-vue'
 
 const route = useRoute()
@@ -89,6 +90,7 @@ const iconMap: Record<string, Component> = {
   DataAnalysis,
   Clock,
   Tools,
+  Shop,
 }
 
 const resolveIcon = (iconName: string) => {
@@ -251,20 +253,20 @@ const handleSelectMenu = (path: string) => {
 
             <div
               class="custom-nav-item"
-              :class="{ active: activePath === '/groupchat' }"
-              @click="handleSelectMenu('/groupchat')"
+              :class="{ active: activePath === '/tools' }"
+              @click="handleSelectMenu('/tools')"
             >
               <div class="nav-item-left">
                 <el-icon><Tools /></el-icon>
                 <span>工具</span>
               </div>
-              <span class="nav-badge">16</span>
+              <span class="nav-badge">中心</span>
             </div>
           </template>
 
           <!-- + 插件按钮 -->
-          <button class="add-plugin-btn" @click="handleSelectMenu('/bot-factory')">
-            <el-icon><Plus /></el-icon>
+          <button class="add-plugin-btn" @click="handleSelectMenu('/marketplace')">
+            <el-icon><Shop /></el-icon>
             <span>+ 插件</span>
           </button>
         </div>

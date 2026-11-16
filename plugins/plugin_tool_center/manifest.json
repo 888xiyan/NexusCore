@@ -1,0 +1,58 @@
+{
+  "plugin_id": "plugin_tool_center",
+  "name": "Tool Center & Skill Engine Plugin",
+  "version": "1.0.0",
+  "plugin_type": "workspace",
+  "description": "系统不可编辑工具、可编辑 Skill 增删改查、外部 MCP 沙盒隔离管理与 Bot-Tool 授权矩阵核心插件",
+  "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_tool_center",
+  "publishing": [
+    "plugin_tool_center.skill.created",
+    "plugin_tool_center.skill.updated",
+    "plugin_tool_center.tool.executed"
+  ],
+  "subscribing": [
+    "tool.command.execute",
+    "tool.command.grant"
+  ],
+  "providing_tools": [
+    "tool_center.list_tools",
+    "tool_center.get_tool",
+    "tool_center.create_skill",
+    "tool_center.update_skill",
+    "tool_center.delete_skill",
+    "tool_center.grant_tool",
+    "tool_center.revoke_grant",
+    "tool_center.execute_tool"
+  ],
+  "requiring_tools": [],
+  "bot_templates": [
+    {
+      "bot_id": "tool_center_bot",
+      "role": "plugin",
+      "display_name": "Tool Center Bot",
+      "activation_mode": "resident",
+      "capabilities": [
+        "tool_governance",
+        "skill_management",
+        "authorization_matrix"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "ui": {
+    "menu": {
+      "title": "工具与技能中心",
+      "icon": "Tools",
+      "path": "/tools",
+      "order": 4
+    },
+    "routes": [
+      {
+        "path": "/tools",
+        "name": "ToolCenter",
+        "entry": "/plugins/tool_center/dist/index.js"
+      }
+    ]
+  },
+  "binary_digest": "7bd9dde1d68830f4a140c3d6c99f36174bfacb761f320fa5cdea4e24769c8b3e"
+}

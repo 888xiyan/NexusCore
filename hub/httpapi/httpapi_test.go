@@ -546,3 +546,173 @@ func TestToolTrajectoriesAPI(t *testing.T) {
 		t.Fatalf("expected 1 filtered trajectory for test_bot, got %d", filtered.Count)
 	}
 }
+
+func TestM10ToolCenterAndDelegationAPI(t *testing.T) {
+	api, _ := newTestAPI(t)
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+
+	// 1. GET /v1/tools (验证至少有内置系统工具)
+	resp, err := http.Get(server.URL + "/v1/tools")
+	if err != nil {
+		t.Fatalf("GET /v1/tools failed: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+	var toolsResp struct {
+		Tools []any `json:"tools"`
+		Count int   `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&toolsResp); err != nil {
+		t.Fatalf("decode tools failed: %v", err)
+	}
+	if toolsResp.Count < 3 {
+		t.Fatalf("expected at least 3 builtin tools, got %d", toolsResp.Count)
+	}
+
+	// 2. POST /v1/tools/skills (创建自定义 Skill)
+	newSkill := map[string]any{
+		"tool_id":             "skill.python.math",
+		"name":                "数学公式计算器",
+		"description":         "执行 Python 数学计算",
+		"is_editable":         true,
+		"runtime":             "python",
+		"code":                "def calc(a, b): return a + b",
+		"config_schema":       `{"type":"object"}`,
+		"network_requirement": "none",
+		"tier":                "tier1",
+		"version":             "1.0.0",
+	}
+	body, _ := json.Marshal(newSkill)
+	createResp, err := http.Post(server.URL+"/v1/tools/skills", "application/json", bytes.NewReader(body))
+	if err != nil || createResp.StatusCode != http.StatusCreated {
+		t.Fatalf("create skill failed: code=%d, err=%v", createResp.StatusCode, err)
+	}
+	createResp.Body.Close()
+
+	// 3. PUT /v1/tools/skills/skill.python.math (更新源码)
+	updatePayload := map[string]any{
+		"code": "def calc(a, b): return (a + b) * 2",
+	}
+	updateBody, _ := json.Marshal(updatePayload)
+	putReq, _ := http.NewRequest(http.MethodPut, server.URL+"/v1/tools/skills/skill.python.math", bytes.NewReader(updateBody))
+	putReq.Header.Set("Content-Type", "application/json")
+	putResp, err := http.DefaultClient.Do(putReq)
+	if err != nil || putResp.StatusCode != http.StatusOK {
+		t.Fatalf("update skill failed: code=%d, err=%v", putResp.StatusCode, err)
+	}
+	putResp.Body.Close()
+
+	// 4. POST /v1/tools/grants (授权给 test_bot)
+	grantPayload := map[string]any{
+		"bot_id":     "test_bot",
+		"tool_id":    "skill.python.math",
+		"permission": "execute",
+		"granted_by": "user_bot",
+	}
+	grantBody, _ := json.Marshal(grantPayload)
+	grantResp, err := http.Post(server.URL+"/v1/tools/grants", "application/json", bytes.NewReader(grantBody))
+	if err != nil || grantResp.StatusCode != http.StatusOK {
+		t.Fatalf("grant tool failed: code=%d, err=%v", grantResp.StatusCode, err)
+	}
+	grantResp.Body.Close()
+
+	// 5. POST /v1/tools/skill.python.math/execute (执行工具)
+	execPayload := map[string]any{
+		"bot_id": "test_bot",
+		"params": map[string]any{"a": 2, "b": 3},
+	}
+	execBody, _ := json.Marshal(execPayload)
+	execResp, err := http.Post(server.URL+"/v1/tools/skill.python.math/execute", "application/json", bytes.NewReader(execBody))
+	if err != nil || execResp.StatusCode != http.StatusOK {
+		t.Fatalf("execute tool failed: code=%d, err=%v", execResp.StatusCode, err)
+	}
+	execResp.Body.Close()
+
+	// 6. 中台代批 RBAC 裁决测试 (Tier 1 放行 vs Tier 2 拦截)
+	tier1Eval := map[string]any{
+		"proposer_bot_id": "assistant_bot",
+		"action_type":     "ui.theme.set",
+		"params":          map[string]any{"theme": "dark"},
+	}
+	t1Body, _ := json.Marshal(tier1Eval)
+	evalResp1, err := http.Post(server.URL+"/v1/delegation/evaluate", "application/json", bytes.NewReader(t1Body))
+	if err != nil || evalResp1.StatusCode != http.StatusOK {
+		t.Fatalf("evaluate Tier 1 failed: %v", err)
+	}
+	var dec1 map[string]any
+	_ = json.NewDecoder(evalResp1.Body).Decode(&dec1)
+	evalResp1.Body.Close()
+	if dec1["allowed"] != true || dec1["requires_hitl"] != false {
+		t.Fatalf("expected Tier 1 allowed, got %+v", dec1)
+	}
+
+	// Tier 2 高危操作拦截测试
+	tier2Eval := map[string]any{
+		"proposer_bot_id": "assistant_bot",
+		"action_type":     "plugin.install",
+		"params":          map[string]any{"plugin_id": "plugin_remote"},
+	}
+	t2Body, _ := json.Marshal(tier2Eval)
+	evalResp2, err := http.Post(server.URL+"/v1/delegation/evaluate", "application/json", bytes.NewReader(t2Body))
+	if err != nil || evalResp2.StatusCode != http.StatusOK {
+		t.Fatalf("evaluate Tier 2 failed: %v", err)
+	}
+	var dec2 map[string]any
+	_ = json.NewDecoder(evalResp2.Body).Decode(&dec2)
+	evalResp2.Body.Close()
+	if dec2["allowed"] != false || dec2["requires_hitl"] != true {
+		t.Fatalf("expected Tier 2 blocked with HITL, got %+v", dec2)
+	}
+
+	// 7. 中台代批执行 Tier 2 未确认拦截 (403 Forbidden)
+	t2ExecNoConfirm := map[string]any{
+		"proposer_bot_id": "assistant_bot",
+		"action_type":     "plugin.install",
+		"params":          map[string]any{"plugin_id": "plugin_remote"},
+		"user_confirmed":  false,
+	}
+	t2ExecBody, _ := json.Marshal(t2ExecNoConfirm)
+	execT2Resp, err := http.Post(server.URL+"/v1/delegation/execute", "application/json", bytes.NewReader(t2ExecBody))
+	if err != nil {
+		t.Fatalf("post delegation execute failed: %v", err)
+	}
+	defer execT2Resp.Body.Close()
+	if execT2Resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403 Forbidden for Tier 2 unconfirmed, got %d", execT2Resp.StatusCode)
+	}
+
+	// 8. 插件商场三阶段测试 (Search -> Download -> Install -> Uninstall)
+	searchResp, err := http.Get(server.URL + "/v1/marketplace/search?q=browser")
+	if err != nil || searchResp.StatusCode != http.StatusOK {
+		t.Fatalf("marketplace search failed: code=%d, err=%v", searchResp.StatusCode, err)
+	}
+	searchResp.Body.Close()
+
+	// Download (Stage 1)
+	dlBody, _ := json.Marshal(map[string]any{"plugin_id": "plugin_browser", "digest": "sha256_mock"})
+	dlResp, err := http.Post(server.URL+"/v1/marketplace/download", "application/json", bytes.NewReader(dlBody))
+	if err != nil || dlResp.StatusCode != http.StatusOK {
+		t.Fatalf("marketplace download stage failed: %v", err)
+	}
+	dlResp.Body.Close()
+
+	// Install (Stage 2 with user confirmation)
+	instBody, _ := json.Marshal(map[string]any{"plugin_id": "plugin_browser", "user_confirmed": true})
+	instResp, err := http.Post(server.URL+"/v1/marketplace/install", "application/json", bytes.NewReader(instBody))
+	if err != nil || instResp.StatusCode != http.StatusOK {
+		t.Fatalf("marketplace install stage failed: %v", err)
+	}
+	instResp.Body.Close()
+
+	// Uninstall (Stage 3)
+	uninstBody, _ := json.Marshal(map[string]any{"plugin_id": "plugin_browser", "cascade": true})
+	uninstResp, err := http.Post(server.URL+"/v1/marketplace/uninstall", "application/json", bytes.NewReader(uninstBody))
+	if err != nil || uninstResp.StatusCode != http.StatusOK {
+		t.Fatalf("marketplace uninstall stage failed: %v", err)
+	}
+	uninstResp.Body.Close()
+}
+

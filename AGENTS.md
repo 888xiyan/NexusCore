@@ -166,7 +166,7 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 | M7 前端微模块化与插件注册表 | 已完成 | 方案 A（Vite ESM 动态导入）：宿主纯净 Shell 骨架（100% 剥离业务硬编码）+ 插件注册表（PluginRegistry）、UI 契约与运行时共享规范（`window.__NEXUS_CORE__`）、微模块独立代码分割（GroupChat / Agent Discovery / Bot Creator）与端到端自动化冒烟（`make smoke-m7`）全链路通过 |
 | M8 基础模块沉淀与依赖治理 | 已完成 | 核心能力下沉无头化（100% 剥离 UI，涵盖 GroupChat、AgentMesh、BotFactory），单测覆盖率全量 ≥ 85%；能力契约入配置中心（SemVer），业务插件清单声明依赖；内核 DAG 拓扑排序加载（Kahn 算法）；环路静态检测（三色标记 DFS）+ 依赖深度硬限制（Max Depth ≤ 2）+ 逆序安全级联卸载 + 两阶段平滑滚动热更新；端到端自动化验收 `make smoke-m8` 10 步全链路通过 |
 | M9 全局UI原型、标准群聊与沙盒轨迹 | 已完成（v0.1.0 旗舰） | 落地手绘原型左右两段导航（纪事/工坊）+ 右侧居中 @ 输入框；标准群聊微前端自治；**内置沙盒记录 Bots 使用工具轨迹**；独立 Schema 存储与原生 UI 主题；`make smoke-m9` 10 步全链路通过 |
-| M10 工具中心、MCP/Skill与中台Bot审批 | 已定版（v0.2.0 生态） | 独立工具插件（系统工具/可编辑Skill/外部MCP）、`bot_tool_grants` 授权矩阵、插件商场与三阶段审批流、中台 Bot 受控代批 RBAC（严禁代批高危操作） |
+| M10 工具中心、MCP/Skill与中台Bot审批 | 已完成（v0.2.0 生态） | 独立工具插件（系统工具/可编辑Skill/外部MCP）、`bot_tool_grants` 授权矩阵、插件商场与三阶段审批流、中台 Bot 受控代批 RBAC（严禁代批高危操作）、`make smoke-m10` 11 步全链路通过 |
 
 ## 常见禁忌（先问用户再做）
 
