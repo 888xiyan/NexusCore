@@ -98,6 +98,8 @@ func serve(ctx context.Context, addr, agentID, cred string) error {
 		_ = conn.Close()
 	}()
 
+	driver := NewLocalCLIDriver(agentID)
+
 	for {
 		_ = conn.SetReadDeadline(time.Now().Add(transport.HeartbeatInterval * 3))
 		f, err := transport.ReadFrame(conn)
@@ -125,7 +127,7 @@ func serve(ctx context.Context, addr, agentID, cred string) error {
 			if !ok {
 				continue // 未注册的 stream_id 不处理
 			}
-			result := execute(protocol, f.Payload)
+			result := execute(driver, protocol, f.Payload)
 			mu.Lock()
 			err := transport.WriteFrame(conn, transport.Frame{
 				FrameType: transport.FrameData, StreamID: f.StreamID, ProtocolID: protocol, Payload: result,
@@ -139,22 +141,26 @@ func serve(ctx context.Context, addr, agentID, cred string) error {
 }
 
 // execute 是插件协议侧的执行语义；内核不解析这些字节。
-// M1 只实现 echo 工具，M5 才引入 bash 白名单与超时截断。
-func execute(protocol string, payload []byte) []byte {
-	if protocol != "nexus.echo.v1" {
+// 支持 M1 echo 工具与 M5 nexus.cli.v1 本地 CLI 驱动。
+func execute(driver *LocalCLIDriver, protocol string, payload []byte) []byte {
+	switch protocol {
+	case "nexus.echo.v1":
+		var req struct {
+			Text  string `json:"text"`
+			JobID string `json:"job_id"`
+		}
+		if err := json.Unmarshal(payload, &req); err != nil {
+			out, _ := json.Marshal(map[string]any{"error": "bad_payload", "exit_code": 2})
+			return out
+		}
+		out, _ := json.Marshal(map[string]any{
+			"echo": req.Text, "exit_code": 0, "job_id": req.JobID, "agent": driver.agentID,
+		})
+		return out
+	case "nexus.cli.v1":
+		return handleCLIProtocol(driver, payload)
+	default:
 		out, _ := json.Marshal(map[string]any{"error": "unsupported_protocol", "protocol_id": protocol})
 		return out
 	}
-	var req struct {
-		Text  string `json:"text"`
-		JobID string `json:"job_id"`
-	}
-	if err := json.Unmarshal(payload, &req); err != nil {
-		out, _ := json.Marshal(map[string]any{"error": "bad_payload", "exit_code": 2})
-		return out
-	}
-	out, _ := json.Marshal(map[string]any{
-		"echo": req.Text, "exit_code": 0, "job_id": req.JobID, "agent": "loopback_agent",
-	})
-	return out
 }

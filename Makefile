@@ -1,7 +1,7 @@
 BIN_DIR := bin
 PLUGIN_BIN_DIR := bin/plugins
 
-.PHONY: build build-plugins test test-pg vet fmt proto migrate-probe migrate-up migrate-down compose-up compose-down smoke-empty smoke-m1 smoke-m2 smoke-m3 smoke-m4 launch-m4 drill-crash-m1 clean
+.PHONY: build build-plugins test test-pg vet fmt proto migrate-probe migrate-up migrate-down compose-up compose-down smoke-empty smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-m8 smoke-m9 launch-m4 drill-crash-m1 clean
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -17,7 +17,13 @@ build-plugins:
 	@go build -o $(PLUGIN_BIN_DIR)/plugin_memory ./plugins/plugin_memory
 	@go build -o $(PLUGIN_BIN_DIR)/plugin_demo ./plugins/plugin_demo
 	@go build -o $(PLUGIN_BIN_DIR)/plugin_groupchat ./GroupChatPlugin
-	@echo "build-plugins ok: $(PLUGIN_BIN_DIR)/{plugin_memory,plugin_demo,plugin_groupchat}"
+	@go build -o $(PLUGIN_BIN_DIR)/plugin_agent_discovery ./plugins/plugin_agent_discovery
+	@go build -o $(PLUGIN_BIN_DIR)/plugin_bot_creator ./plugins/plugin_bot_creator
+	@DISCOVERY_DIGEST=$$(sha256sum $(PLUGIN_BIN_DIR)/plugin_agent_discovery | awk '{print $$1}'); \
+	python3 -c "import json; p='plugins/plugin_agent_discovery/manifest.json'; m=json.load(open(p)); m['binary_digest']='$$DISCOVERY_DIGEST'; json.dump(m, open(p,'w'), indent=2)"
+	@CREATOR_DIGEST=$$(sha256sum $(PLUGIN_BIN_DIR)/plugin_bot_creator | awk '{print $$1}'); \
+	python3 -c "import json; p='plugins/plugin_bot_creator/manifest.json'; m=json.load(open(p)); m['binary_digest']='$$CREATOR_DIGEST'; json.dump(m, open(p,'w'), indent=2)"
+	@echo "build-plugins ok: $(PLUGIN_BIN_DIR)/{plugin_memory,plugin_demo,plugin_groupchat,plugin_agent_discovery,plugin_bot_creator}"
 
 test:
 	@go test ./...
@@ -100,6 +106,25 @@ smoke-m3:
 # M4 验收：Vue 3 前端工作台构建、多 Bot 群聊交互、单体记忆抽屉编辑与重启、Agent 实时监控与端到端实机演练
 smoke-m4:
 	@./scripts/smoke-m4.sh
+
+# M5 验收：本地 Coding Agent 搜寻、LocalCLIDriver 受控执行、Bot 结构化调度与抗噪音蒸馏闭环
+smoke-m5:
+	@./scripts/smoke-m5.sh
+
+smoke-m6:
+	@./scripts/smoke-m6.sh
+
+# M7 验收：前端微模块化、ESM 动态插件注册表、宿主纯净 Shell 与视区解耦
+smoke-m7:
+	@./scripts/smoke-m7.sh
+
+# M8 验收：基础模块无头化沉淀、接口契约入配置中心、DAG 拓扑加载、循环依赖拦截与两阶段依赖治理
+smoke-m8:
+	@./scripts/smoke-m8.sh
+
+# M9 验收：全局 UI 原型、标准群聊插件与沙盒工具轨迹审计闭环
+smoke-m9:
+	@./scripts/smoke-m9.sh
 
 # M4 实机启动：一键启动微内核网关、群聊插件、受控探针与 Vue 3 前端工作台
 launch-m4:

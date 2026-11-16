@@ -1,0 +1,1240 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Nexus Storybook Console</title>
+  <!-- 引入 Google Fonts: 衬线体(童话绘本感) + 无衬线体 + 等宽字体(Claude Code 感) -->
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&family=Newsreader:ital,opsz,wght@0,6..72,400;0,6..72,500;0,6..72,600;1,6..72,400&family=Noto+Serif+SC:wght@400;500;600&family=Plus+Jakarta+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+  
+  <style>
+    :root {
+      /* Claude 童话羊皮纸配色体系 (默认白昼) */
+      --bg-parchment: #F6F4EE;
+      --bg-sidebar: #EFECE4;
+      --bg-card: #FCFBF9;
+      --bg-hover: #E6E1D5;
+      
+      --text-ink: #1F1E1B;
+      --text-muted: #6E6A61;
+      --text-faint: #9E998E;
+      
+      --accent-terracotta: #D97757;
+      --accent-terracotta-soft: rgba(217, 119, 87, 0.14);
+      --accent-sage: #5A7D68;
+      --accent-gold: #C89D54;
+      
+      --border-warm: #DFDAD0;
+      --border-strong: #C9C2B4;
+      
+      --shadow-storybook: 0 10px 30px -5px rgba(31, 30, 27, 0.06), 0 2px 8px -1px rgba(31, 30, 27, 0.04);
+      --shadow-float: 0 16px 40px -8px rgba(31, 30, 27, 0.12);
+    }
+
+    [data-theme="dark"] {
+      /* 午夜古籍与星空黑夜配色体系 */
+      --bg-parchment: #151513;
+      --bg-sidebar: #1C1B18;
+      --bg-card: #23221E;
+      --bg-hover: #2E2C27;
+      
+      --text-ink: #EAE6DF;
+      --text-muted: #A8A398;
+      --text-faint: #706B60;
+      
+      --accent-terracotta: #E08264;
+      --accent-terracotta-soft: rgba(224, 130, 100, 0.2);
+      --accent-sage: #7DA68E;
+      --accent-gold: #E5B96E;
+      
+      --border-warm: #2F2D27;
+      --border-strong: #45423A;
+      
+      --shadow-storybook: 0 10px 30px -5px rgba(0, 0, 0, 0.4);
+      --shadow-float: 0 16px 40px -8px rgba(0, 0, 0, 0.6);
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      background-color: var(--bg-parchment);
+      color: var(--text-ink);
+      font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+      height: 100vh;
+      display: flex;
+      overflow: hidden;
+      /* 微妙的纸张纹理噪点感背景 */
+      background-image: 
+        radial-gradient(circle at 80% 15%, rgba(217, 119, 87, 0.06) 0%, transparent 40%),
+        radial-gradient(circle at 20% 85%, rgba(90, 125, 104, 0.06) 0%, transparent 40%);
+    }
+
+    /* ==================== 左侧导航栏 (对应原型左侧区域) ==================== */
+    .sidebar {
+      width: 256px;
+      background-color: var(--bg-sidebar);
+      border-right: 1.5px solid var(--border-warm);
+      display: flex;
+      flex-direction: column;
+      padding: 28px 18px;
+      position: relative;
+      user-select: none;
+      flex-shrink: 0;
+    }
+
+    /* 顶部童话徽章标题 */
+    .brand-header {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 0 12px 24px 12px;
+      font-family: 'Newsreader', 'Noto Serif SC', serif;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--text-ink);
+      letter-spacing: -0.01em;
+    }
+
+    .brand-sparkle {
+      color: var(--accent-terracotta);
+      width: 22px;
+      height: 22px;
+      flex-shrink: 0;
+      animation: gentle-pulse 4s ease-in-out infinite;
+    }
+
+    @keyframes gentle-pulse {
+      0%, 100% { transform: scale(1) rotate(0deg); }
+      50% { transform: scale(1.1) rotate(8deg); }
+    }
+
+    .nav-group {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .nav-group-label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--text-faint);
+      padding: 0 12px 6px 12px;
+    }
+
+    .nav-item {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 10px 14px;
+      border-radius: 10px;
+      color: var(--text-muted);
+      font-family: 'Noto Serif SC', 'Newsreader', serif;
+      font-size: 1.02rem;
+      font-weight: 500;
+      cursor: pointer;
+      transition: all 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+      border: 1px solid transparent;
+    }
+
+    .nav-item-left {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .nav-item svg {
+      width: 18px;
+      height: 18px;
+      stroke-width: 1.8;
+      color: var(--text-muted);
+      transition: color 0.2s ease, transform 0.2s ease;
+    }
+
+    .nav-item:hover {
+      background-color: var(--bg-hover);
+      color: var(--text-ink);
+    }
+
+    .nav-item:hover svg {
+      color: var(--accent-terracotta);
+      transform: translateX(2px);
+    }
+
+    .nav-item.active {
+      background-color: var(--bg-card);
+      color: var(--text-ink);
+      border-color: var(--border-warm);
+      box-shadow: 0 2px 6px rgba(31, 30, 27, 0.04);
+    }
+
+    .nav-item.active svg {
+      color: var(--accent-terracotta);
+    }
+
+    .nav-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      background-color: var(--bg-parchment);
+      color: var(--text-muted);
+      padding: 2px 7px;
+      border-radius: 99px;
+      border: 1px solid var(--border-warm);
+    }
+
+    /* 原型中的左侧横向分割线 —— 改造为童话书页星芒分割线 */
+    .storybook-divider {
+      margin: 22px 8px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--border-strong);
+    }
+
+    .storybook-divider::before,
+    .storybook-divider::after {
+      content: "";
+      flex: 1;
+      height: 1.5px;
+      background: linear-gradient(90deg, transparent, var(--border-strong), transparent);
+    }
+
+    .storybook-divider span {
+      font-size: 0.85rem;
+      color: var(--accent-terracotta);
+      opacity: 0.75;
+    }
+
+    /* "+ 插件" 按钮样式 */
+    .plugin-add-btn {
+      margin-top: 8px;
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 11px 14px;
+      border-radius: 10px;
+      border: 1.5px dashed var(--border-strong);
+      background-color: rgba(252, 251, 249, 0.5);
+      color: var(--accent-terracotta);
+      font-family: 'Noto Serif SC', serif;
+      font-size: 0.98rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+
+    .plugin-add-btn:hover {
+      background-color: var(--accent-terracotta-soft);
+      border-color: var(--accent-terracotta);
+      transform: translateY(-1px);
+    }
+
+    .sidebar-footer {
+      margin-top: auto;
+      padding: 12px 12px 0;
+      border-top: 1px solid var(--border-warm);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.75rem;
+      color: var(--text-faint);
+    }
+
+    .status-dot {
+      display: inline-block;
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background-color: var(--accent-sage);
+      margin-right: 6px;
+      box-shadow: 0 0 0 3px rgba(90, 125, 104, 0.2);
+    }
+
+    /* ==================== 右侧主工作区 ==================== */
+    .main-stage {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 40px;
+      position: relative;
+      overflow-y: auto;
+    }
+
+    /* 背景角落的手绘风装饰插画 */
+    .corner-ornament {
+      position: absolute;
+      pointer-events: none;
+      opacity: 0.35;
+      color: var(--border-strong);
+    }
+    .corner-top-right {
+      top: 28px;
+      right: 36px;
+    }
+    .corner-bottom-left {
+      bottom: 28px;
+      left: 36px;
+    }
+
+    .center-container {
+      width: 100%;
+      max-width: 720px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      transform: translateY(-2vh);
+    }
+
+    /* Claude Code 风格的童话引言区 */
+    .storybook-greeting {
+      text-align: center;
+      margin-bottom: 32px;
+    }
+
+    .storybook-illustration {
+      width: 56px;
+      height: 56px;
+      margin: 0 auto 14px;
+      background-color: var(--bg-card);
+      border: 1.5px solid var(--border-warm);
+      border-radius: 16px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: var(--shadow-storybook);
+      color: var(--accent-terracotta);
+    }
+
+    .storybook-title {
+      font-family: 'Newsreader', 'Noto Serif SC', serif;
+      font-size: 2rem;
+      font-weight: 500;
+      color: var(--text-ink);
+      letter-spacing: -0.02em;
+      margin-bottom: 8px;
+    }
+
+    .storybook-subtitle {
+      font-family: 'Noto Serif SC', 'Newsreader', serif;
+      font-size: 0.96rem;
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
+    /* ==================== 核心 @xxx| 输入框 (对应原型右侧红圈) ==================== */
+    .composer-wrapper {
+      width: 100%;
+      position: relative;
+    }
+
+    /* @ 提及弹出菜单 */
+    .mention-popover {
+      position: absolute;
+      bottom: calc(100% + 12px);
+      left: 16px;
+      width: 280px;
+      background-color: var(--bg-card);
+      border: 1.5px solid var(--border-strong);
+      border-radius: 14px;
+      box-shadow: var(--shadow-float);
+      padding: 8px;
+      display: none;
+      z-index: 20;
+      animation: pop-up 0.18s cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .mention-popover.visible {
+      display: block;
+    }
+
+    @keyframes pop-up {
+      from { opacity: 0; transform: translateY(8px) scale(0.98); }
+      to { opacity: 1; transform: translateY(0) scale(1); }
+    }
+
+    .mention-header {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      color: var(--text-faint);
+      padding: 4px 10px 6px;
+      border-bottom: 1px solid var(--border-warm);
+      margin-bottom: 4px;
+    }
+
+    .mention-option {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding: 8px 10px;
+      border-radius: 8px;
+      cursor: pointer;
+      font-size: 0.88rem;
+      transition: background 0.15s;
+    }
+
+    .mention-option:hover,
+    .mention-option.selected {
+      background-color: var(--accent-terracotta-soft);
+    }
+
+    .mention-option-name {
+      font-family: 'JetBrains Mono', monospace;
+      font-weight: 500;
+      color: var(--text-ink);
+    }
+
+    .mention-option-type {
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      font-family: 'Noto Serif SC', serif;
+    }
+
+    /* 输入框外层羊皮纸卡片 */
+    .prompt-box {
+      width: 100%;
+      background-color: var(--bg-card);
+      border: 2px solid var(--border-strong);
+      border-radius: 26px;
+      padding: 18px 22px 14px 22px;
+      box-shadow: var(--shadow-storybook);
+      transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .prompt-box:focus-within {
+      border-color: var(--accent-terracotta);
+      box-shadow: 0 14px 36px -8px rgba(217, 119, 87, 0.18), 0 0 0 4px rgba(217, 119, 87, 0.08);
+      transform: translateY(-1px);
+    }
+
+    .input-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      flex-wrap: wrap;
+      min-height: 36px;
+    }
+
+    /* 胶囊式 @xxx 标签 */
+    .mention-pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      background-color: var(--accent-terracotta-soft);
+      color: var(--accent-terracotta);
+      border: 1px solid rgba(217, 119, 87, 0.35);
+      padding: 5px 12px;
+      border-radius: 999px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.95rem;
+      font-weight: 500;
+      user-select: none;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .mention-pill:hover {
+      background-color: rgba(217, 119, 87, 0.22);
+    }
+
+    .mention-pill .remove-pill {
+      font-size: 0.85rem;
+      opacity: 0.7;
+      margin-left: 2px;
+    }
+
+    .mention-pill .remove-pill:hover {
+      opacity: 1;
+    }
+
+    /* 实际文本输入区 */
+    .prompt-input {
+      flex: 1;
+      min-width: 200px;
+      border: none;
+      outline: none;
+      background: transparent;
+      font-family: 'Noto Serif SC', 'Newsreader', serif;
+      font-size: 1.15rem;
+      color: var(--text-ink);
+       caret-color: var(--accent-terracotta);
+    }
+
+    .prompt-input::placeholder {
+      color: var(--text-faint);
+      font-style: italic;
+    }
+
+    /* 输入框底部工具条 */
+    .prompt-toolbar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      padding-top: 8px;
+      border-top: 1px dashed var(--border-warm);
+    }
+
+    .toolbar-left {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .tool-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      padding: 4px 10px;
+      border-radius: 8px;
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.76rem;
+      color: var(--text-muted);
+      background-color: var(--bg-parchment);
+      border: 1px solid var(--border-warm);
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .tool-chip:hover {
+      border-color: var(--accent-terracotta);
+      color: var(--text-ink);
+    }
+
+    .send-btn {
+      background-color: var(--accent-terracotta);
+      color: #FFF;
+      border: none;
+      border-radius: 99px;
+      padding: 7px 16px;
+      font-family: 'Noto Serif SC', serif;
+      font-size: 0.86rem;
+      font-weight: 500;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+      box-shadow: 0 2px 8px rgba(217, 119, 87, 0.3);
+    }
+
+    .send-btn:hover {
+      background-color: #C56547;
+      transform: translateY(-1px);
+    }
+
+    /* 输入框下方的童话风格快捷指令气泡 */
+    .quick-tales {
+      margin-top: 22px;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 10px;
+    }
+
+    .tale-tag {
+      padding: 7px 14px;
+      border-radius: 99px;
+      background-color: rgba(252, 251, 249, 0.7);
+      border: 1px solid var(--border-warm);
+      font-family: 'Noto Serif SC', serif;
+      font-size: 0.84rem;
+      color: var(--text-muted);
+      cursor: pointer;
+      transition: all 0.2s ease;
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    .tale-tag span.code-ref {
+      font-family: 'JetBrains Mono', monospace;
+      color: var(--accent-terracotta);
+      font-size: 0.8rem;
+    }
+
+    .tale-tag:hover {
+      background-color: var(--bg-card);
+      border-color: var(--border-strong);
+      color: var(--text-ink);
+      transform: translateY(-1px);
+      box-shadow: 0 4px 12px rgba(31, 30, 27, 0.04);
+    }
+
+    /* 顶部状态预览条 (当切换左侧菜单时温和反馈) */
+    .context-banner {
+      margin-top: 28px;
+      padding: 12px 18px;
+      border-radius: 12px;
+      background-color: var(--bg-sidebar);
+      border: 1px solid var(--border-warm);
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.8rem;
+      color: var(--text-muted);
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+
+    .context-banner strong {
+      color: var(--text-ink);
+    }
+
+    /* 主题切换工具按钮组 */
+    .theme-switch-group {
+      display: inline-flex;
+      align-items: center;
+      background: var(--bg-hover);
+      border-radius: 99px;
+      padding: 2px;
+      gap: 2px;
+      border: 1px solid var(--border-warm);
+    }
+    .theme-btn {
+      background: transparent;
+      border: none;
+      padding: 4px 8px;
+      border-radius: 99px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      color: var(--text-muted);
+      transition: all 0.15s ease;
+    }
+    .theme-btn.active {
+      background: var(--bg-card);
+      color: var(--text-ink);
+      box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+    }
+
+    /* 内置沙盒工具轨迹抽屉 (Sandbox Trajectory Drawer) */
+    .sandbox-drawer-overlay {
+      position: fixed;
+      inset: 0;
+      background: rgba(0, 0, 0, 0.4);
+      backdrop-filter: blur(2px);
+      z-index: 999;
+      display: none;
+      animation: fadeIn 0.2s ease;
+    }
+    .sandbox-drawer-overlay.visible {
+      display: flex;
+      justify-content: flex-end;
+    }
+    .sandbox-drawer {
+      width: 580px;
+      max-width: 90vw;
+      height: 100%;
+      background: var(--bg-card);
+      border-left: 2px solid var(--border-strong);
+      box-shadow: var(--shadow-float);
+      display: flex;
+      flex-direction: column;
+      animation: slideLeft 0.25s cubic-bezier(0.16, 1, 0.3, 1);
+      overflow: hidden;
+    }
+    @keyframes slideLeft {
+      from { transform: translateX(100%); }
+      to { transform: translateX(0); }
+    }
+    @keyframes fadeIn {
+      from { opacity: 0; }
+      to { opacity: 1; }
+    }
+    .drawer-header {
+      padding: 20px 24px;
+      border-bottom: 1.5px solid var(--border-warm);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      background: var(--bg-sidebar);
+    }
+    .drawer-title-group {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .drawer-title {
+      font-family: 'Newsreader', 'Noto Serif SC', serif;
+      font-size: 1.25rem;
+      font-weight: 600;
+      color: var(--text-ink);
+    }
+    .drawer-badge {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.72rem;
+      padding: 3px 8px;
+      border-radius: 99px;
+      background: var(--accent-terracotta-soft);
+      color: var(--accent-terracotta);
+      border: 1px solid rgba(217,119,87,0.3);
+    }
+    .drawer-close {
+      background: transparent;
+      border: none;
+      font-size: 1.25rem;
+      cursor: pointer;
+      color: var(--text-muted);
+      padding: 4px;
+      border-radius: 6px;
+    }
+    .drawer-close:hover {
+      color: var(--text-ink);
+      background: var(--bg-hover);
+    }
+    .drawer-body {
+      padding: 20px 24px;
+      overflow-y: auto;
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 18px;
+    }
+    .sandbox-state-card {
+      background: var(--bg-parchment);
+      border: 1px solid var(--border-warm);
+      border-radius: 12px;
+      padding: 14px 18px;
+      font-size: 0.84rem;
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 10px;
+    }
+    .state-item {
+      display: flex;
+      flex-direction: column;
+      gap: 2px;
+    }
+    .state-item label {
+      font-family: 'JetBrains Mono', monospace;
+      font-size: 0.7rem;
+      color: var(--text-faint);
+    }
+    .state-item span {
+      font-weight: 500;
+      color: var(--text-ink);
+    }
+    .trajectory-item {
+      background: var(--bg-parchment);
+      border: 1px solid var(--border-warm);
+      border-radius: 12px;
+      padding: 16px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      font-family: 'JetBrains Mono', monospace;
+    }
+    .trajectory-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      border-bottom: 1px dashed var(--border-warm);
+      padding-bottom: 8px;
+      font-size: 0.8rem;
+    }
+    .trajectory-bot {
+      color: var(--accent-terracotta);
+      font-weight: 600;
+    }
+    .trajectory-tool {
+      color: var(--accent-sage);
+      font-weight: 600;
+    }
+    .trajectory-code {
+      background: var(--bg-sidebar);
+      padding: 10px 12px;
+      border-radius: 8px;
+      font-size: 0.78rem;
+      color: var(--text-ink);
+      white-space: pre-wrap;
+      word-break: break-all;
+      border: 1px solid var(--border-warm);
+    }
+
+    /* 响应式微调 */
+    @media (max-width: 768px) {
+      body {
+        flex-direction: column;
+      }
+      .sidebar {
+        width: 100%;
+        height: auto;
+        border-right: none;
+        border-bottom: 1.5px solid var(--border-warm);
+        padding: 16px;
+      }
+      .sidebar-footer {
+        display: none;
+      }
+    }
+  </style>
+</head>
+<body>
+
+  <!-- ==================== 左侧边栏 (严格对应原型上下分区) ==================== -->
+  <aside class="sidebar">
+    <div class="brand-header">
+      <svg class="brand-sparkle" viewBox="0 0 24 24" fill="currentColor">
+        <path d="M12 1L14.8 9.2L23 12L14.8 14.8L12 23L9.2 14.8L1 12L9.2 9.2L12 1Z"/>
+      </svg>
+      <span>Atelier Code</span>
+    </div>
+
+    <!-- 上半区：日志 / 数据 / 定时任务 -->
+    <div class="nav-group" id="upper-nav">
+      <div class="nav-group-label">Chronicles · 纪事</div>
+      
+      <div class="nav-item" data-section="日志" data-desc="实时查看 Agent 思考轨迹与系统运行手札">
+        <div class="nav-item-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M4 19.5v-15A2.5 2.5 0 0 1 6.5 2H20v20H6.5a2.5 2.5 0 0 1 0-5H20"/>
+          </svg>
+          <span>日志</span>
+        </div>
+        <span class="nav-badge">128</span>
+      </div>
+
+      <div class="nav-item" data-section="数据" data-desc="管理知识图谱、上下文记忆库与结构化表">
+        <div class="nav-item-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <ellipse cx="12" cy="5" rx="9" ry="3"/>
+            <path d="M3 5V19A9 3 0 0 0 21 19V5"/>
+            <path d="M3 12A9 3 0 0 0 21 12"/>
+          </svg>
+          <span>数据</span>
+        </div>
+        <span class="nav-badge">4.2 MB</span>
+      </div>
+
+      <div class="nav-item" data-section="定时任务" data-desc="配置晨间简报、自动巡检与周期性契约">
+        <div class="nav-item-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <circle cx="12" cy="13" r="8"/>
+            <path d="M12 9v4l2 2"/>
+            <path d="M5 3 2 6"/>
+            <path d="m22 6-3-3"/>
+          </svg>
+          <span>定时任务</span>
+        </div>
+        <span class="nav-badge">3 活跃</span>
+      </div>
+    </div>
+
+    <!-- 原型中的水平分界线 -->
+    <div class="storybook-divider">
+      <span>✦</span>
+    </div>
+
+    <!-- 下半区：agents / bots / 工具 / + 插件 -->
+    <div class="nav-group" id="lower-nav">
+      <div class="nav-group-label">Companions · 伙伴与工坊</div>
+
+      <div class="nav-item active" data-section="agents" data-desc="已唤醒 4 位具备自主推理与工具编排能力的智能体">
+        <div class="nav-item-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M12 3a6 6 0 0 0 9 9 9 9 0 1 1-9-9Z"/>
+            <path d="M19 3v4"/>
+            <path d="M21 5h-4"/>
+          </svg>
+          <span>agents</span>
+        </div>
+        <span class="nav-badge">4</span>
+      </div>
+
+      <div class="nav-item" data-section="bots" data-desc="管理自动化执行信使与多端消息桥接器">
+        <div class="nav-item-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <rect width="18" height="10" x="3" y="11" rx="2"/>
+            <circle cx="12" cy="5" r="2"/>
+            <path d="M12 7v4"/>
+            <line x1="8" x2="8" y1="16" y2="16"/>
+            <line x1="16" x2="16" y1="16" y2="16"/>
+          </svg>
+          <span>bots</span>
+        </div>
+        <span class="nav-badge">2</span>
+      </div>
+
+      <div class="nav-item" data-section="工具" data-desc="本地 Shell、文件读写、搜索引擎与 MCP 工具箱">
+        <div class="nav-item-left">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.77-3.77a6 6 0 0 1-7.94 7.94l-6.91 6.91a2.12 2.12 0 0 1-3-3l6.91-6.91a6 6 0 0 1 7.94-7.94l-3.76 3.76z"/>
+          </svg>
+          <span>工具</span>
+        </div>
+        <span class="nav-badge">16</span>
+      </div>
+
+      <button class="plugin-add-btn" id="add-plugin-btn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <line x1="12" y1="5" x2="12" y2="19"></line>
+          <line x1="5" y1="12" x2="19" y2="12"></line>
+        </svg>
+        <span>插件</span>
+      </button>
+    </div>
+
+    <div class="sidebar-footer">
+      <div><span class="status-dot"></span>ready</div>
+      <div class="theme-switch-group">
+        <button class="theme-btn active" id="theme-light-btn" title="白昼羊皮纸">☀️</button>
+        <button class="theme-btn" id="theme-dark-btn" title="午夜星空">🌙</button>
+        <button class="theme-btn" id="theme-auto-btn" title="跟随系统">💻</button>
+      </div>
+    </div>
+  </aside>
+
+  <!-- ==================== 右侧主舞台 (对应原型右侧核心输入区) ==================== -->
+  <main class="main-stage">
+    <!-- 手绘星轨角落装饰 -->
+    <svg class="corner-ornament corner-top-right" width="120" height="120" viewBox="0 0 120 120" fill="none">
+      <path d="M10 10 C 60 10, 110 60, 110 110" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 4"/>
+      <circle cx="60" cy="26" r="3" fill="#D97757"/>
+      <path d="M90 15 L93 23 L101 26 L93 29 L90 37 L87 29 L79 26 L87 23 Z" fill="currentColor"/>
+    </svg>
+
+    <svg class="corner-ornament corner-bottom-left" width="120" height="120" viewBox="0 0 120 120" fill="none">
+      <path d="M110 110 C 60 110, 10 60, 10 10" stroke="currentColor" stroke-width="1.2" stroke-dasharray="4 4"/>
+      <circle cx="28" cy="75" r="3" fill="#5A7D68"/>
+    </svg>
+
+    <div class="center-container">
+      <!-- 童话绘本风问候头部 -->
+      <div class="storybook-greeting">
+        <div class="storybook-illustration">
+          <!-- 童话羽毛笔与星芒图标 -->
+          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M20.24 12.24a6 6 0 0 0-8.49-8.49L5 10.5V19h8.5z"/>
+            <line x1="16" y1="8" x2="2" y2="22"/>
+            <line x1="17.5" y1="15" x2="9" y2="15"/>
+          </svg>
+        </div>
+        <h1 class="storybook-title">今天想谱写哪一段工坊指令？</h1>
+        <p class="storybook-subtitle">输入 <strong>@</strong> 召唤你的 Agent、Bot 或工具，像翻阅绘本一样编排任务</p>
+      </div>
+
+      <!-- 核心输入框区域 (@xxx| 输入框) -->
+      <div class="composer-wrapper">
+        <!-- @ 候选菜单 -->
+        <div class="mention-popover" id="mention-popover">
+          <div class="mention-header">召唤工坊伙伴 (点击或回车选择)</div>
+          <div class="mention-option selected" data-mention="@researcher">
+            <span class="mention-option-name">@researcher</span>
+            <span class="mention-option-type">Agent · 文献与检索</span>
+          </div>
+          <div class="mention-option" data-mention="@coder">
+            <span class="mention-option-name">@coder</span>
+            <span class="mention-option-type">Agent · 架构与代码</span>
+          </div>
+          <div class="mention-option" data-mention="@cron-herald">
+            <span class="mention-option-name">@cron-herald</span>
+            <span class="mention-option-type">Bot · 定时信使</span>
+          </div>
+          <div class="mention-option" data-mention="@log-inspector">
+            <span class="mention-option-name">@log-inspector</span>
+            <span class="mention-option-type">工具 · 日志诊断</span>
+          </div>
+        </div>
+
+        <!-- 胶囊大输入框 -->
+        <div class="prompt-box" id="prompt-box">
+          <div class="input-row" id="input-row">
+            <!-- 默认展示原型中的 @xxx 胶囊 -->
+            <div class="mention-pill" id="active-pill" title="点击切换或移除">
+              <span id="pill-text">@xxx</span>
+              <span class="remove-pill" id="remove-pill">×</span>
+            </div>
+
+            <input
+              type="text"
+              class="prompt-input"
+              id="prompt-input"
+              placeholder="输入框... 试着键入 @ 召唤其它伙伴，或直接下达指令"
+              autofocus
+            />
+          </div>
+
+          <div class="prompt-toolbar">
+            <div class="toolbar-left">
+              <button class="tool-chip" id="trigger-mention-btn" type="button">
+                <span>@ 提及目标</span>
+              </button>
+              <button class="tool-chip" id="open-sandbox-btn" type="button" title="查看 Bots 使用工具轨迹">
+                <span>⚡ 沙盒工具轨迹</span>
+              </button>
+            </div>
+            <button class="send-btn" id="send-btn" type="button">
+              <span>执行章节</span>
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+                <line x1="5" y1="12" x2="19" y2="12"></line>
+                <polyline points="12 5 19 12 12 19"></polyline>
+              </svg>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      <!-- 快捷绘本指令示例 -->
+      <div class="quick-tales">
+        <div class="tale-tag" data-mention="@coder" data-prompt="检查最近一次构建日志并修复异常">
+          <span class="code-ref">@coder</span> 检查最近一次构建日志并修复异常
+        </div>
+        <div class="tale-tag" data-mention="@cron-herald" data-prompt="每天早上 8:00 汇总技术早报">
+          <span class="code-ref">@cron-herald</span> 每天早上 8:00 汇总技术早报
+        </div>
+        <div class="tale-tag" data-mention="@researcher" data-prompt="整理知识库中的分布式架构笔记">
+          <span class="code-ref">@researcher</span> 整理知识库中的分布式架构笔记
+        </div>
+      </div>
+
+      <!-- 左侧导航联动状态提示 -->
+      <div class="context-banner" id="context-banner">
+        <span>📖 当前翻阅章节：<strong>agents</strong></span>
+        <span>—</span>
+        <span id="context-desc">已唤醒 4 位具备自主推理与工具编排能力的智能体</span>
+      </div>
+    </div>
+  </main>
+
+  <!-- ==================== 内置沙盒工具轨迹记录抽屉 (对应需求: 记录bots使用工具轨迹) ==================== -->
+  <div class="sandbox-drawer-overlay" id="sandbox-drawer-overlay">
+    <div class="sandbox-drawer">
+      <div class="drawer-header">
+        <div class="drawer-title-group">
+          <span class="drawer-title">内置沙盒 · 工具调用轨迹</span>
+          <span class="drawer-badge">实时审计中</span>
+        </div>
+        <button class="drawer-close" id="drawer-close-btn">&times;</button>
+      </div>
+      <div class="drawer-body">
+        <div class="sandbox-state-card">
+          <div class="state-item">
+            <label>执行隔离层级</label>
+            <span>Linux Namespace / cgroups</span>
+          </div>
+          <div class="state-item">
+            <label>网络沙盒状态</label>
+            <span style="color:var(--accent-sage)">普通离线 / 搜索放行 443</span>
+          </div>
+          <div class="state-item">
+            <label>防死循环保护</label>
+            <span>代码级 3 层锁 (仅用户@)</span>
+          </div>
+          <div class="state-item">
+            <label>单体记忆配额</label>
+            <span>MEMORY.md &le; 200 行</span>
+          </div>
+        </div>
+
+        <div style="font-family:'JetBrains Mono', monospace; font-size: 0.76rem; color:var(--text-faint); margin-top:4px;">
+          TOOL EXECUTION TRAJECTORIES (BOTS 真实调用留痕)
+        </div>
+
+        <!-- 轨迹条目 1：@researcher 联网搜索 -->
+        <div class="trajectory-item">
+          <div class="trajectory-header">
+            <div><span class="trajectory-bot">@researcher</span> &rarr; <span class="trajectory-tool">nexus.search.engine</span></div>
+            <span style="font-size:0.7rem; color:var(--text-faint);">14:26:02 · 312ms</span>
+          </div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">
+            <strong>入参 (Payload):</strong> {"query": "NexusCore 微内核架构设计", "max_results": 5}
+          </div>
+          <div class="trajectory-code">[SANDBOX EGRESS] 允许对外连接: api.search.org:443 (已通知中台 user_bot)
+[OUTPUT STREAM] 匹配到 5 条知识索引，内容长度 12.4 KB...
+[DISTILLATION] 经噪音蒸馏引擎提炼，压缩至 4 行关键摘要。</div>
+        </div>
+
+        <!-- 轨迹条目 2：@coder 调用本地 CLI -->
+        <div class="trajectory-item">
+          <div class="trajectory-header">
+            <div><span class="trajectory-bot">@coder</span> &rarr; <span class="trajectory-tool">local_cli.git</span></div>
+            <span style="font-size:0.7rem; color:var(--text-faint);">14:28:15 · 84ms</span>
+          </div>
+          <div style="font-size:0.75rem; color:var(--text-muted);">
+            <strong>入参 (Payload):</strong> {"cmd": "git status -s"}
+          </div>
+          <div class="trajectory-code">[SANDBOX OFFLINE] 网络隔离已锁定 (禁止出网)
+[OUTPUT] M internal/modules/scenarios_test.go
+[EXIT CODE] 0 (执行成功，已落库因果链审计表)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const promptInput = document.getElementById('prompt-input');
+    const mentionPopover = document.getElementById('mention-popover');
+    const activePill = document.getElementById('active-pill');
+    const pillText = document.getElementById('pill-text');
+    const removePillBtn = document.getElementById('remove-pill');
+    const triggerMentionBtn = document.getElementById('trigger-mention-btn');
+    const navItems = document.querySelectorAll('.nav-item');
+    const contextBanner = document.getElementById('context-banner');
+    const sendBtn = document.getElementById('send-btn');
+
+    // 1. 左侧边栏切换交互
+    navItems.forEach(item => {
+      item.addEventListener('click', () => {
+        navItems.forEach(n => n.classList.remove('active'));
+        item.classList.add('active');
+        const sectionName = item.getAttribute('data-section');
+        const sectionDesc = item.getAttribute('data-desc');
+        contextBanner.innerHTML = `
+          <span>📖 当前翻阅章节：<strong>${sectionName}</strong></span>
+          <span>—</span>
+          <span>${sectionDesc}</span>
+        `;
+      });
+    });
+
+    // 2. 监听输入框键入 @ 呼出候选菜单
+    promptInput.addEventListener('input', (e) => {
+      const val = e.target.value;
+      if (val.endsWith('@')) {
+        mentionPopover.classList.add('visible');
+      } else if (!val.includes('@')) {
+        mentionPopover.classList.remove('visible');
+      }
+    });
+
+    // 点击 "@ 提及目标" 按钮呼出菜单
+    triggerMentionBtn.addEventListener('click', () => {
+      mentionPopover.classList.toggle('visible');
+      promptInput.focus();
+    });
+
+    // 3. 选择 @ 菜单项更新胶囊
+    document.querySelectorAll('.mention-option').forEach(option => {
+      option.addEventListener('click', () => {
+        const mentionValue = option.getAttribute('data-mention');
+        setMentionPill(mentionValue);
+        // 清理输入框末尾多余的 @
+        promptInput.value = promptInput.value.replace(/@$/, '');
+        mentionPopover.classList.remove('visible');
+        promptInput.focus();
+      });
+    });
+
+    function setMentionPill(name) {
+      pillText.textContent = name;
+      activePill.style.display = 'inline-flex';
+    }
+
+    // 移除 @xxx 胶囊
+    removePillBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      activePill.style.display = 'none';
+      promptInput.focus();
+    });
+
+    // 4. 点击下方快捷指令气泡直接填入
+    document.querySelectorAll('.tale-tag').forEach(tag => {
+      tag.addEventListener('click', () => {
+        const mention = tag.getAttribute('data-mention');
+        const prompt = tag.getAttribute('data-prompt');
+        setMentionPill(mention);
+        promptInput.value = prompt;
+        promptInput.focus();
+      });
+    });
+
+    // 5. "+ 插件" 按钮与发送反馈
+    document.getElementById('add-plugin-btn').addEventListener('click', () => {
+      setMentionPill('@plugin-smith');
+      promptInput.value = '帮我挂载一个新的本地 MCP 插件：';
+      promptInput.focus();
+    });
+
+    function triggerSend() {
+      const target = activePill.style.display !== 'none' ? pillText.textContent : '@system';
+      const text = promptInput.value.trim();
+      if (!text) {
+        promptInput.focus();
+        return;
+      }
+      contextBanner.innerHTML = `
+        <span>✨ 已向 <strong>${target}</strong> 派发指令：</span>
+        <span>“${text}”</span>
+      `;
+      promptInput.value = '';
+    }
+
+    sendBtn.addEventListener('click', triggerSend);
+    promptInput.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') {
+        triggerSend();
+      } else if (e.key === 'Backspace' && promptInput.value === '' && activePill.style.display !== 'none') {
+        activePill.style.display = 'none';
+      }
+    });
+
+    // 点击外部关闭弹窗
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('.composer-wrapper')) {
+        mentionPopover.classList.remove('visible');
+      }
+    });
+
+    // 6. 内置沙盒工具轨迹抽屉交互 (对应需求: 记录bots使用工具轨迹)
+    const sandboxDrawer = document.getElementById('sandbox-drawer-overlay');
+    const drawerCloseBtn = document.getElementById('drawer-close-btn');
+    const openSandboxBtn = document.getElementById('open-sandbox-btn');
+
+    function openDrawer() {
+      sandboxDrawer.classList.add('visible');
+    }
+    function closeDrawer() {
+      sandboxDrawer.classList.remove('visible');
+    }
+
+    if (openSandboxBtn) openSandboxBtn.addEventListener('click', openDrawer);
+    if (drawerCloseBtn) drawerCloseBtn.addEventListener('click', closeDrawer);
+    sandboxDrawer.addEventListener('click', (e) => {
+      if (e.target === sandboxDrawer) closeDrawer();
+    });
+
+    // 点击左侧“日志”时自动展开沙盒轨迹抽屉
+    const logNavItem = document.querySelector('.nav-item[data-section="日志"]');
+    if (logNavItem) {
+      logNavItem.addEventListener('click', () => {
+        openDrawer();
+      });
+    }
+
+    // 7. 原生 UI 主题切换系统 (白昼 ☀️ / 午夜 🌙 / 跟随系统 💻)
+    const themeLightBtn = document.getElementById('theme-light-btn');
+    const themeDarkBtn = document.getElementById('theme-dark-btn');
+    const themeAutoBtn = document.getElementById('theme-auto-btn');
+    const themeBtns = [themeLightBtn, themeDarkBtn, themeAutoBtn];
+
+    function applyTheme(theme) {
+      themeBtns.forEach(btn => btn && btn.classList.remove('active'));
+      if (theme === 'dark') {
+        document.documentElement.setAttribute('data-theme', 'dark');
+        if (themeDarkBtn) themeDarkBtn.classList.add('active');
+      } else if (theme === 'light') {
+        document.documentElement.setAttribute('data-theme', 'light');
+        if (themeLightBtn) themeLightBtn.classList.add('active');
+      } else {
+        const prefersDark = window.matchMedia('(prefers-color-scheme: dark)').matches;
+        document.documentElement.setAttribute('data-theme', prefersDark ? 'dark' : 'light');
+        if (themeAutoBtn) themeAutoBtn.classList.add('active');
+      }
+    }
+
+    if (themeLightBtn) themeLightBtn.addEventListener('click', () => applyTheme('light'));
+    if (themeDarkBtn) themeDarkBtn.addEventListener('click', () => applyTheme('dark'));
+    if (themeAutoBtn) themeAutoBtn.addEventListener('click', () => applyTheme('auto'));
+  </script>
+</body>
+</html>

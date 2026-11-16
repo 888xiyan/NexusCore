@@ -17,6 +17,7 @@ NexusCore 是一个以微内核为基础的个人智能工作台：内核只负�
 | 初版全景方案 | 11.03 10:47 | 搭建跨设备记忆与工作台 | 确立 Go Hub、Python 记忆引擎、Tauri 工作台、VS Code 插件组合；提出 `ContextEnvelope` 与记忆图谱 |
 | 微内核插件化方案 | 11.03 10:52 | 防止功能膨胀成巨石单体 | 提出内核只保留底层原语；业务全部插件化 |
 | 脑手分离方案 | 11.03 11:27 | 划清 Bot 与 Agent、Bot 记忆与项目记忆边界 | 提出 Bot/Agent 双工任务流、输出蒸馏、正交记忆矩阵和记忆晋升机制 |
+| 系统 Update 方案 | 11.16 15:00 | 全局 UI 统一、沙盒工具轨迹审计与生态治理 | 确立左侧两段导航+右侧@输入框原型；内置沙盒记录工具轨迹；三层Bot与审批闭环（详见 `doc/系统Update-全局UI原型与沙盒工具轨迹审计详细设计.md`） |
 
 最终采用第三阶段的边界规则，并保留前两阶段的模块划分与技术选型；2026-11-12 起记忆不再作为内核数据面存在，而是整体收敛为记忆插件（D-22）。
 
@@ -1230,9 +1231,9 @@ memory_external_refs
 | Step 1 (M1-M2) | Bot与插件生命周期 | 四角色骨架落位、配置中心完整审批流（提案/diff/sha256/激活/回滚/密钥）、Bot 运行时管理（lazy/resident 双模式）、插件两级进程模型（L1 Bot + L2 插件独立进程 setsid + 优雅停止/强制kill/孤儿级联回收）、DLQ 运营、Health 观测。已完成（`d569a80`） |
 | Step 2 (M3) | 单体记忆与群聊底座 | **Kernel/ 内置 Bot 原生单体记忆**（对齐 Claude Code 四层栈：Transcripts/Notes/Representations/Injected Context ≤200行，Auto Dream 离线整合，重启生效）；完善插件安装规范；独立开发 `GroupChatPlugin/`（房间管理、上下文滑动窗口、**严格仅仅用户@触发**，杜绝自发死循环）；Bot 简单 Agent 化（禁Shell、禁长思考、操控 Agent 闭环） |
 | Step 3 (M4) | Vue 工作台与实机演示 | **Frontend/ 独立工程搭建（Vue 3 + Vite）**：多 Bot 群聊交互主视区、Markdown 流式渲染与 @Mention 补全、Bot 画像/单体记忆抽屉式编辑并重启生效、Agent 实时执行面板；实现多 Bot 操控 Agent 完整实机端到端演示与验收。已完成 |
-| Step 4 (M5) | Agent Mesh 实真 | 原生 TCP 会话实真、跨设备探针接入、Bash 工具白名单、超时与输出截断、健康上报继承完整因果链、流式回传、输出双层结构、HITL 授权挂起 |
-| Step 5 (M6) | 外部输入通道 | Telegram / 飞书连接器插件、批注浏览器、外部 Webhook 接入，多端消息统一入总线 |
-| Step 6 | 外围业务 | PM 看板、IM 连接器、更多执行器和工具 |
+| Step 4 (M5) | 本地 Agent 搜寻与调度闭环 | 本地 Coding Agent CLI 搜寻插件（`plugin_agent_discovery`，探测 Claude Code / Codex / Pi-Agent / Agy 等）、agent-daemon CLI 适配驱动（非交互/管道模式）、Bot 将用户提示词结构化发送给 Agent、返回值智能精选后回复用户（用户不直接与 CLI 通话） |
+| Step 5 (M6) | Bot 工厂与 Agent 绑定插件 | 全局单 API Key 统筹所有 Bot、轻量 Bot 创建向导、自由定制 Bot 画像/Persona/System Prompt/单体记忆（≤200行硬约束）、勾选绑定 M5 搜寻到的本地 Agent 资产、Supervisor 重启生效（暂不考虑复杂工具开发与复杂模型路由） |
+| Step 6 (M7) | 前端微模块化与插件注册表 | 方案 A（Vite ESM 动态导入）：Frontend 宿主纯净壳（布局骨架/状态栏/Element Plus设计系统/网关SSE总线/Plugin Registry）+ 插件自主实现路由、菜单与视图组件动态挂载 |
 
 ## 12. 当前必须明确的工程决策
 
@@ -1316,3 +1317,4 @@ Bot 运行边界同样不可侵蚀：Bot 不是 hub 内嵌协程，而是内核�
 | 2026-11-13 | 落实 D-23：**PostgreSQL 内核化 + 配置中心**。PostgreSQL 成为内核唯一状态底座（单 database `nexus` + `kernel / memory / vault` schema；队列 SKIP LOCKED + LISTEN/NOTIFY + 兜底轮询；驱动 pgx/v5）。新增配置中心模块（非第四原语）：`plugin / bot / agent / global` 四类配置，proposal → security_bot 预审（可执行类）→ user_bot 批准（绑定 checksum）→ active，版本化、可回滚、只存 secret ref。内核侧四角色职责同步：user_bot 批准、create_bot 读 active 投影、monitor_bot 观测配置漂移、security_bot 预审。**MCP / Skill 不纳入配置中心**（无运行时，后续另立设计）。涉及第 1、3.1、3.3.1、4、6.5、6.6、6.7、6.9、6.11、8、11、12、13 节。 | `doc/ConfigCenter/ConfigCenter详细设计.md` |
 | 2026-11-13 | 落实 D-24：**群聊协作实机演练 + 单体记忆对齐 Claude Code**。目录明确解耦为 `Kernel/`（微内核底座与原生单体四层记忆栈，严格约束 `MEMORY.md` ≤ 200 行，Auto Dream 离线整合，重启生效）、`GroupChatPlugin/`（独立开发的群聊插件，严格“仅用户@触发”，杜绝自发级联死循环）、`Frontend/`（独立 Vue 3 前端工作台）。Bot 定位为简单 Agent（禁长思考、禁直接执行 Shell、操控 Agent 探针闭环）；M3/M4 验收标准直指多 Bot 群聊与操控 Agent 完整实机端到端演示。涉及第 1、3.1、3.3、5.1、11、12 节。 | `AGENTS.md` / `doc/开发规划.md` / `doc/BotMvp/` |
 | 2026-11-14 | M4 里程碑全量交付落地：完成 `Frontend/` 独立工程搭建（Vue 3 + Vite + Pinia + Element Plus）、微内核网关 CORS 与 SSE 实时事件广播（`:7200`）、多 Bot 群聊视区（严格仅用户@触发路由）、Bot 画像与单体记忆抽屉（严格约束 `MEMORY.md` ≤ 200 行、一键保存重启）、Agent 实时执行流式监视面板、11 步端到端自动化验收脚本（`make smoke-m4`）与开发者一键启动脚本（`make launch-m4`）。涉及第 11 节落地路线与变更日志。 | `AGENTS.md` / `doc/开发规划.md` / `doc/M4开发总结.md` |
+| 2026-11-14 | M5~M7 里程碑规划演进确立：聚焦为“以用户为中心的本地多智能体与 Coding CLI 统一协同工作台”。确立 M5（本地 Coding Agent CLI 搜寻插件、agent-daemon CLI 适配驱动、Bot 结构化用户需求发给 Agent、精选返回值回复用户）、M6（全局单 API Key 统筹、Bot 工厂轻量创建与画像自由定制、绑定已搜寻到的本地 Agent、Supervisor 重启生效）、M7（前端微模块化方案 A：Vite ESM 动态加载，宿主 Shell 提供壳与插件注册表 Plugin Registry，插件自主实现路由与页面）。涉及第 11 节落地路线与开发规划。 | `doc/开发规划.md` / `AGENTS.md` |

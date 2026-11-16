@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/888xiyan/NexusCore/hub/httpapi"
+	"github.com/888xiyan/NexusCore/hub/plugin"
 	"github.com/888xiyan/NexusCore/hub/transport"
 )
 
@@ -433,5 +434,115 @@ func TestInputValidationAndErrorPaths(t *testing.T) {
 	handler.ServeHTTP(rec3, req3)
 	if rec3.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 on empty content, got %d", rec3.Code)
+	}
+}
+
+func TestPluginManifestUIValidation(t *testing.T) {
+	manifestJSON := `{
+		"plugin_id": "plugin_groupchat",
+		"name": "GroupChat Plugin",
+		"version": "1.0.0",
+		"plugin_type": "workspace",
+		"schema_version": 1,
+		"ui": {
+			"menu": {
+				"title": "群聊协同工作台",
+				"icon": "ChatDotRound",
+				"path": "/groupchat",
+				"order": 1
+			},
+			"routes": [
+				{
+					"path": "/groupchat",
+					"name": "GroupChatWorkspace",
+					"entry": "/plugins/groupchat/dist/index.js"
+				}
+			]
+		}
+	}`
+
+	var mf plugin.Manifest
+	if err := json.Unmarshal([]byte(manifestJSON), &mf); err != nil {
+		t.Fatalf("failed to unmarshal manifest with UI: %v", err)
+	}
+
+	if mf.UI == nil {
+		t.Fatal("expected UI manifest to be parsed, got nil")
+	}
+	if mf.UI.Menu == nil || mf.UI.Menu.Path != "/groupchat" || mf.UI.Menu.Icon != "ChatDotRound" {
+		t.Fatalf("unexpected UI menu manifest: %+v", mf.UI.Menu)
+	}
+	if len(mf.UI.Routes) != 1 || mf.UI.Routes[0].Path != "/groupchat" {
+		t.Fatalf("unexpected UI routes: %+v", mf.UI.Routes)
+	}
+}
+
+func TestToolTrajectoriesAPI(t *testing.T) {
+	api, _ := newTestAPI(t)
+	server := httptest.NewServer(api.Handler())
+	defer server.Close()
+
+	// 1. GET initial seed trajectories
+	resp, err := http.Get(server.URL + "/v1/trajectories")
+	if err != nil {
+		t.Fatalf("GET /v1/trajectories failed: %v", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", resp.StatusCode)
+	}
+	var listResp struct {
+		Trajectories []httpapi.ToolTrajectory `json:"trajectories"`
+		Count        int                      `json:"count"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&listResp); err != nil {
+		t.Fatalf("decode GET response failed: %v", err)
+	}
+	if listResp.Count < 2 {
+		t.Fatalf("expected at least 2 seed trajectories, got %d", listResp.Count)
+	}
+
+	// 2. POST new trajectory
+	newTraj := httpapi.ToolTrajectory{
+		TrajectoryID:    "traj_test_001",
+		Traceparent:     "00-test-trace-01",
+		BotID:           "test_bot",
+		ToolID:          "nexus.search.engine",
+		ToolType:        "internet_search",
+		SandboxID:       "sandbox_test_01",
+		NetworkPolicy:   "search_allowlist",
+		InputPayload:    json.RawMessage(`{"q":"nexus"}`),
+		ExitCode:        0,
+		DistilledOutput: "测试结果蒸馏摘要",
+		DurationMs:      120,
+	}
+	body, _ := json.Marshal(newTraj)
+	postResp, err := http.Post(server.URL+"/v1/trajectories", "application/json", bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("POST /v1/trajectories failed: %v", err)
+	}
+	defer postResp.Body.Close()
+
+	if postResp.StatusCode != http.StatusOK {
+		t.Fatalf("expected 200 OK, got %d", postResp.StatusCode)
+	}
+
+	// 3. GET with filter bot_id=test_bot
+	filterResp, err := http.Get(server.URL + "/v1/trajectories?bot_id=test_bot")
+	if err != nil {
+		t.Fatalf("GET filtered failed: %v", err)
+	}
+	defer filterResp.Body.Close()
+
+	var filtered struct {
+		Trajectories []httpapi.ToolTrajectory `json:"trajectories"`
+		Count        int                      `json:"count"`
+	}
+	if err := json.NewDecoder(filterResp.Body).Decode(&filtered); err != nil {
+		t.Fatalf("decode filtered failed: %v", err)
+	}
+	if filtered.Count != 1 || filtered.Trajectories[0].BotID != "test_bot" {
+		t.Fatalf("expected 1 filtered trajectory for test_bot, got %d", filtered.Count)
 	}
 }

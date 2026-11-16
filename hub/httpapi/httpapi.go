@@ -47,6 +47,23 @@ type ChatMessage struct {
 	Timestamp string   `json:"timestamp"`
 }
 
+// ToolTrajectory 记录内置沙盒中 Bots 执行工具的完整审计轨迹 (M9)
+type ToolTrajectory struct {
+	TrajectoryID    string          `json:"trajectory_id"`
+	Traceparent     string          `json:"traceparent"`
+	BotID           string          `json:"bot_id"`
+	ToolID          string          `json:"tool_id"`
+	ToolType        string          `json:"tool_type"` // "builtin" | "probe_cli" | "internet_search" | "mcp"
+	SandboxID       string          `json:"sandbox_id"`
+	NetworkPolicy   string          `json:"network_policy"` // "offline" | "search_allowlist"
+	InputPayload    json.RawMessage `json:"input_payload"`
+	ExitCode        int             `json:"exit_code"`
+	RawOutputRef    string          `json:"raw_output_ref,omitempty"`
+	DistilledOutput string          `json:"distilled_output"`
+	DurationMs      int64           `json:"duration_ms"`
+	ExecutedAt      string          `json:"executed_at"`
+}
+
 type API struct {
 	st     *store.Store
 	reg    *registry.Registry
@@ -66,6 +83,10 @@ type API struct {
 	// 房间聊天历史记录 room_id -> []ChatMessage
 	chatMu      sync.RWMutex
 	chatHistory map[string][]ChatMessage
+
+	// 内置沙盒工具执行轨迹审计
+	trajectoryMu sync.RWMutex
+	trajectories []ToolTrajectory
 
 	// FixtureBinder 由 hub 注入，用于 M1 冒烟夹具绑定真实二进制（M2 起由插件 install 取代）
 	FixtureBinder func(ctx context.Context) error
@@ -123,6 +144,28 @@ func (a *API) BroadcastAgentEvent(evt transport.FrameEvent) {
 	a.BroadcastEvent("agent_event", evt)
 }
 
+func (a *API) BroadcastTrajectory(traj ToolTrajectory) {
+	a.BroadcastEvent("tool_trajectory", traj)
+}
+
+func (a *API) RecordTrajectory(traj ToolTrajectory) ToolTrajectory {
+	if traj.TrajectoryID == "" {
+		traj.TrajectoryID = fmt.Sprintf("traj_%d", time.Now().UnixNano())
+	}
+	if traj.ExecutedAt == "" {
+		traj.ExecutedAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	a.trajectoryMu.Lock()
+	a.trajectories = append(a.trajectories, traj)
+	if len(a.trajectories) > 200 {
+		a.trajectories = a.trajectories[len(a.trajectories)-200:]
+	}
+	a.trajectoryMu.Unlock()
+
+	a.BroadcastTrajectory(traj)
+	return traj
+}
+
 func New(st *store.Store, reg *registry.Registry, ing *ingress.Ingress, sched *scheduler.Scheduler,
 	cfg *config.Module, disp *outbox.Dispatcher, router *transport.Router) *API {
 	api := &API{
@@ -136,6 +179,36 @@ func New(st *store.Store, reg *registry.Registry, ing *ingress.Ingress, sched *s
 		memMgr:      memory.NewManager("data/bots"),
 		sseSubs:     make(map[chan sseMessage]struct{}),
 		chatHistory: make(map[string][]ChatMessage),
+		trajectories: []ToolTrajectory{
+			{
+				TrajectoryID:    "traj_seed_001",
+				Traceparent:     "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+				BotID:           "researcher_bot",
+				ToolID:          "nexus.search.engine",
+				ToolType:        "internet_search",
+				SandboxID:       "sandbox_probe_net_01",
+				NetworkPolicy:   "search_allowlist",
+				InputPayload:    json.RawMessage(`{"query":"NexusCore 微内核架构设计","max_results":5}`),
+				ExitCode:        0,
+				DistilledOutput: "匹配到 5 条知识索引，内容长度 12.4 KB，经噪音蒸馏压缩至 4 行摘要。",
+				DurationMs:      312,
+				ExecutedAt:      time.Now().Add(-10 * time.Minute).UTC().Format(time.RFC3339),
+			},
+			{
+				TrajectoryID:    "traj_seed_002",
+				Traceparent:     "00-a1b2c3d4e5f60718293a4b5c6d7e8f90-1234567890abcdef-01",
+				BotID:           "coder_bot",
+				ToolID:          "local_cli.git",
+				ToolType:        "probe_cli",
+				SandboxID:       "sandbox_probe_off_02",
+				NetworkPolicy:   "offline",
+				InputPayload:    json.RawMessage(`{"cmd":"git status -s"}`),
+				ExitCode:        0,
+				DistilledOutput: "工作区已收敛，3 个变更已就绪，沙盒离线安全执行无外联。",
+				DurationMs:      84,
+				ExecutedAt:      time.Now().Add(-2 * time.Minute).UTC().Format(time.RFC3339),
+			},
+		},
 	}
 	if router != nil {
 		router.OnFrame = func(evt transport.FrameEvent) {
@@ -197,6 +270,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/bots", a.handleBotList)
 	mux.HandleFunc("POST /v1/bots/{bot_id}/enable", a.handleBotEnable)
 	mux.HandleFunc("POST /v1/create-bot/pull", a.handleCreateBotPull)
+	mux.HandleFunc("GET /v1/agents", a.handleAgentList)
 
 	// M2: 插件生命周期与两级进程 API
 	mux.HandleFunc("POST /v1/plugins/install", a.handlePluginInstall)
@@ -225,6 +299,10 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/bots/{bot_id}/restart", a.handleBotRestart)
 	mux.HandleFunc("GET /v1/chat/messages", a.handleChatMessagesGet)
 	mux.HandleFunc("POST /v1/chat/messages", a.handleChatMessagesPost)
+
+	// M9: 内置沙盒工具轨迹审计 API
+	mux.HandleFunc("GET /v1/trajectories", a.handleTrajectoriesGet)
+	mux.HandleFunc("POST /v1/trajectories", a.handleTrajectoriesPost)
 
 	return a.withCORS(mux)
 }
@@ -992,6 +1070,43 @@ func (a *API) handleBotList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, out)
 }
 
+func (a *API) handleAgentList(w http.ResponseWriter, r *http.Request) {
+	if a.st == nil {
+		writeErr(w, http.StatusServiceUnavailable, "数据库未连接")
+		return
+	}
+	rows, err := a.st.Pool().Query(r.Context(), `
+		SELECT agent_id, COALESCE(display_name, ''), capabilities, status, last_seen_at
+		  FROM kernel_agents
+		 ORDER BY agent_id`)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer rows.Close()
+
+	type agentItem struct {
+		AgentID      string          `json:"agent_id"`
+		DisplayName  string          `json:"display_name"`
+		Capabilities json.RawMessage `json:"capabilities"`
+		Status       string          `json:"status"`
+		LastSeenAt   *time.Time      `json:"last_seen_at,omitempty"`
+	}
+	var out []agentItem
+	for rows.Next() {
+		var it agentItem
+		if err := rows.Scan(&it.AgentID, &it.DisplayName, &it.Capabilities, &it.Status, &it.LastSeenAt); err != nil {
+			writeErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out = append(out, it)
+	}
+	if out == nil {
+		out = []agentItem{}
+	}
+	writeJSON(w, http.StatusOK, out)
+}
+
 type botEnableReq struct {
 	Mode    string `json:"mode"`
 	Enabled bool   `json:"enabled"`
@@ -1085,7 +1200,7 @@ func (a *API) handlePluginInstall(w http.ResponseWriter, r *http.Request) {
 
 func (a *API) handlePluginList(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.st.Pool().Query(r.Context(), `
-		SELECT plugin_id, plugin_type, display_name, namespace, status, config_version, created_at
+		SELECT plugin_id, plugin_type, display_name, namespace, status, config_version, created_at, manifest_json
 		  FROM kernel_plugins ORDER BY plugin_id`)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err.Error())
@@ -1094,20 +1209,30 @@ func (a *API) handlePluginList(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type pluginItem struct {
-		PluginID      string    `json:"plugin_id"`
-		PluginType    string    `json:"plugin_type"`
-		DisplayName   string    `json:"display_name"`
-		Namespace     string    `json:"namespace"`
-		Status        string    `json:"status"`
-		ConfigVersion *int64    `json:"config_version,omitempty"`
-		CreatedAt     time.Time `json:"created_at"`
+		PluginID      string             `json:"plugin_id"`
+		PluginType    string             `json:"plugin_type"`
+		DisplayName   string             `json:"display_name"`
+		Namespace     string             `json:"namespace"`
+		Status        string             `json:"status"`
+		ConfigVersion *int64             `json:"config_version,omitempty"`
+		CreatedAt     time.Time          `json:"created_at"`
+		UI            *plugin.UIManifest `json:"ui,omitempty"`
 	}
 	var out []pluginItem
 	for rows.Next() {
 		var it pluginItem
-		if err := rows.Scan(&it.PluginID, &it.PluginType, &it.DisplayName, &it.Namespace, &it.Status, &it.ConfigVersion, &it.CreatedAt); err != nil {
+		var rawManifest []byte
+		if err := rows.Scan(&it.PluginID, &it.PluginType, &it.DisplayName, &it.Namespace, &it.Status, &it.ConfigVersion, &it.CreatedAt, &rawManifest); err != nil {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
+		}
+		if len(rawManifest) > 0 {
+			var mf struct {
+				UI *plugin.UIManifest `json:"ui"`
+			}
+			if err := json.Unmarshal(rawManifest, &mf); err == nil && mf.UI != nil {
+				it.UI = mf.UI
+			}
 		}
 		out = append(out, it)
 	}
@@ -1736,3 +1861,57 @@ func (a *API) handleChatMessagesPost(w http.ResponseWriter, r *http.Request) {
 
 	writeJSON(w, http.StatusOK, msg)
 }
+
+func (a *API) handleTrajectoriesGet(w http.ResponseWriter, r *http.Request) {
+	botID := r.URL.Query().Get("bot_id")
+	limitStr := r.URL.Query().Get("limit")
+	limit := 50
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	a.trajectoryMu.RLock()
+	var res []ToolTrajectory
+	for i := len(a.trajectories) - 1; i >= 0; i-- {
+		t := a.trajectories[i]
+		if botID != "" && t.BotID != botID {
+			continue
+		}
+		res = append(res, t)
+		if len(res) >= limit {
+			break
+		}
+	}
+	a.trajectoryMu.RUnlock()
+
+	if res == nil {
+		res = []ToolTrajectory{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"trajectories": res,
+		"count":        len(res),
+	})
+}
+
+func (a *API) handleTrajectoriesPost(w http.ResponseWriter, r *http.Request) {
+	var traj ToolTrajectory
+	if err := json.NewDecoder(r.Body).Decode(&traj); err != nil {
+		writeErr(w, http.StatusBadRequest, "解析轨迹请求体失败: "+err.Error())
+		return
+	}
+	if traj.BotID == "" || traj.ToolID == "" {
+		writeErr(w, http.StatusBadRequest, "bot_id 和 tool_id 不能为空")
+		return
+	}
+	if traj.ToolType == "" {
+		traj.ToolType = "builtin"
+	}
+	if traj.NetworkPolicy == "" {
+		traj.NetworkPolicy = "offline"
+	}
+	saved := a.RecordTrajectory(traj)
+	writeJSON(w, http.StatusOK, saved)
+}
+
