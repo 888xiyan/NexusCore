@@ -1,0 +1,48 @@
+{
+  "plugin_id": "plugin_agent_discovery",
+  "name": "Local Agent Discovery Plugin",
+  "version": "1.0.0",
+  "plugin_type": "executor",
+  "description": "\u672c\u5730\u5bbf\u4e3b\u673a Coding Agent \u8d44\u4ea7\u81ea\u52a8\u63a2\u6d4b\u3001\u7248\u672c\u8403\u53d6\u4e0e\u767b\u8bb0\u63d2\u4ef6",
+  "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_agent_discovery",
+  "publishing": [
+    "plugin_agent_discovery.agent.discovered",
+    "plugin_agent_discovery.scan.completed"
+  ],
+  "subscribing": [
+    "bot.command.scan_agents"
+  ],
+  "providing_tools": [
+    "agent_discovery.scan_now",
+    "agent_discovery.list_agents"
+  ],
+  "requiring_tools": [],
+  "bot_templates": [
+    {
+      "bot_id": "discovery_bot",
+      "role": "plugin",
+      "display_name": "Agent Discovery Bot",
+      "activation_mode": "resident",
+      "capabilities": [
+        "agent_discovery"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "ui": {
+    "menu": {
+      "title": "Agent \u8d44\u4ea7\u4e0e\u63a2\u9488",
+      "icon": "Cpu",
+      "path": "/agents",
+      "order": 2
+    },
+    "routes": [
+      {
+        "path": "/agents",
+        "name": "AgentDiscovery",
+        "entry": "/plugins/agent_discovery/dist/index.js"
+      }
+    ]
+  },
+  "binary_digest": "6aa1743f6e54b5cd40d4496e7479b3cefa923d12f025ff1e1ccc580ff1f730d1"
+}

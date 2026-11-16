@@ -46,6 +46,7 @@ func main() {
 		idleTTL       = flag.Int("idle-ttl", 300, "无任务空闲多久后自退出（秒）")
 		configVersion = flag.Int64("config-version", 0, "启动时加载的配置版本")
 		agentID       = flag.String("agent-id", "loopback_agent", "echo 工具的目标 Agent")
+		agentCLI      = flag.String("agent-cli", "", "默认调度的本地 CLI 名称（如 codex, pi, claude, nexus-mock-agent）")
 		pluginID      = flag.String("plugin-id", "", "所属插件 ID（若为 owner bot 则 exec 插件进程）")
 		pluginBinary  = flag.String("plugin-binary", "", "插件进程独立二进制路径")
 		pluginDigest  = flag.String("plugin-digest", "", "插件进程制品摘要")
@@ -84,7 +85,7 @@ func main() {
 
 	b := &bot{
 		id: *botID, cred: cred, client: client, httpBase: "http://" + *hubHTTP,
-		transportAddr: *hubTransport, agentID: *agentID, configVersion: *configVersion,
+		transportAddr: *hubTransport, agentID: *agentID, agentCLI: *agentCLI, configVersion: *configVersion,
 		idleTTL:  time.Duration(*idleTTL) * time.Second,
 		pluginID: *pluginID, pluginBinary: *pluginBinary, pluginDigest: *pluginDigest,
 		memMgr: memMgr, injectedMemory: injectedMem,
@@ -125,6 +126,7 @@ type bot struct {
 	httpBase      string
 	transportAddr string
 	agentID       string
+	agentCLI      string
 	configVersion int64
 	idleTTL       time.Duration
 
@@ -506,13 +508,26 @@ func (b *bot) handleTask(ctx context.Context, task *pb.TaskAssignment) error {
 	}
 
 	// 严禁自身执行 Shell：物理与工具操作统一经 Hub Transport 调度目标 agent 执行
-	echoed, err := b.echoViaAgent(taskCtx, task.JobId, text)
-	if err != nil {
-		return err
+	var (
+		reply      string
+		toolOutput string
+		execErr    error
+	)
+	if b.agentCLI != "" || (b.agentID != "loopback_agent" && b.agentID != "") {
+		toolOutput, execErr = b.dispatchAgentCLI(taskCtx, task.JobId, text)
+		if execErr != nil {
+			return execErr
+		}
+		reply = toolOutput
+	} else {
+		toolOutput, execErr = b.echoViaAgent(taskCtx, task.JobId, text)
+		if execErr != nil {
+			return execErr
+		}
+		// 组织结构化回复（带 Agent 卡片和记忆上下文，回复仅作纯文本，不级联唤醒）
+		reply = fmt.Sprintf("[%s 响应] 已完成指令处理\n- 状态: 成功\n- 调度 Agent: %s\n- 物理执行结果: %s", b.id, b.agentID, toolOutput)
 	}
 
-	// 组织结构化回复（带 Agent 卡片和记忆上下文，回复仅作纯文本，不级联唤醒）
-	reply := fmt.Sprintf("[%s 响应] 已完成指令处理\n- 状态: 成功\n- 调度 Agent: %s\n- 物理执行结果: %s", b.id, b.agentID, echoed)
 	if b.injectedMemory != "" {
 		reply += fmt.Sprintf("\n- 记忆上下文: 已注入 MEMORY.md (%d 行)", memory.CountLines(b.injectedMemory))
 	}
@@ -525,7 +540,7 @@ func (b *bot) handleTask(ctx context.Context, task *pb.TaskAssignment) error {
 			Role:           "bot",
 			Content:        reply,
 			ToolCall:       b.agentID + ".exec",
-			ToolResult:     echoed,
+			ToolResult:     toolOutput,
 			CorrelationID:  causal.CorrelationID,
 			RootEnvelopeID: causal.RootEnvelopeID,
 		}); err != nil {
@@ -537,10 +552,10 @@ func (b *bot) handleTask(ctx context.Context, task *pb.TaskAssignment) error {
 	if err := b.submitReply(taskCtx, causal, reply); err != nil {
 		return err
 	}
-	_, err = b.client.AckTask(b.callContext(taskCtx), &pb.AckTaskRequest{
+	_, ackErr := b.client.AckTask(b.callContext(taskCtx), &pb.AckTaskRequest{
 		JobId: task.JobId, LeaseToken: task.LeaseToken, ResultRef: reply,
 	})
-	return err
+	return ackErr
 }
 
 // pluginControlResult 经 AckTask.ResultRef 返回，拒绝也结束本次任务，让调用方可见错误。
@@ -663,6 +678,85 @@ func (b *bot) echoViaAgent(ctx context.Context, jobID, text string) (string, err
 	}
 	_ = transport.WriteFrame(conn, transport.Frame{FrameType: transport.FrameClose, StreamID: ack.StreamID})
 	return string(resp.Payload), nil
+}
+
+// dispatchAgentCLI 走传输路由使用 nexus.cli.v1 调度目标本地 Coding Agent，并对输出进行防噪音蒸馏
+func (b *bot) dispatchAgentCLI(ctx context.Context, jobID, text string) (string, error) {
+	dialer := net.Dialer{Timeout: 10 * time.Second}
+	conn, err := dialer.DialContext(ctx, "tcp", b.transportAddr)
+	if err != nil {
+		return "", fmt.Errorf("连接传输路由: %w", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(60 * time.Second))
+
+	if err := transport.WriteFrame(conn, transport.Frame{FrameType: transport.FrameAuth, Payload: []byte(b.cred)}); err != nil {
+		return "", err
+	}
+	if _, err := transport.ReadFrame(conn); err != nil {
+		return "", fmt.Errorf("传输鉴权应答: %w", err)
+	}
+
+	cmd := b.agentCLI
+	if cmd == "" {
+		cmd = "nexus-mock-agent"
+	}
+
+	openReq, err := json.Marshal(transport.OpenRequest{
+		TargetAgentID: b.agentID, ProtocolID: "nexus.cli.v1", JobID: jobID,
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := transport.WriteFrame(conn, transport.Frame{FrameType: transport.FrameOpen, Payload: openReq}); err != nil {
+		return "", err
+	}
+	ack, err := transport.ReadFrame(conn)
+	if err != nil {
+		return "", fmt.Errorf("开流应答: %w", err)
+	}
+	if ack.FrameType != transport.FrameOpenAck {
+		return "", fmt.Errorf("期望 open_ack，得到 %s", ack.FrameType)
+	}
+
+	reqPayload, err := json.Marshal(map[string]any{
+		"command":     cmd,
+		"prompt":      text,
+		"timeout_sec": 30,
+		"job_id":      jobID,
+	})
+	if err != nil {
+		return "", err
+	}
+	if err := transport.WriteFrame(conn, transport.Frame{
+		FrameType: transport.FrameData, StreamID: ack.StreamID, ProtocolID: "nexus.cli.v1", Payload: reqPayload,
+	}); err != nil {
+		return "", err
+	}
+	resp, err := transport.ReadFrame(conn)
+	if err != nil {
+		return "", fmt.Errorf("读取 CLI 结果: %w", err)
+	}
+	_ = transport.WriteFrame(conn, transport.Frame{FrameType: transport.FrameClose, StreamID: ack.StreamID})
+
+	var cliResp struct {
+		ExitCode  int    `json:"exit_code"`
+		Stdout    string `json:"stdout"`
+		Stderr    string `json:"stderr"`
+		ElapsedMS int64  `json:"elapsed_ms"`
+		Truncated bool   `json:"truncated"`
+		Error     string `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(resp.Payload, &cliResp); err != nil {
+		return string(resp.Payload), nil
+	}
+
+	if cliResp.Error != "" && cliResp.ExitCode == 0 {
+		cliResp.ExitCode = 1
+	}
+
+	distilled := DistillCLIOutput(cliResp.Stdout, cliResp.Stderr, cliResp.ExitCode, cliResp.ElapsedMS)
+	return fmt.Sprintf("[%s 响应] 已完成指令处理\n- **调用探针**: `%s` (执行器: `%s`)\n%s", b.id, b.agentID, cmd, distilled), nil
 }
 
 func (b *bot) submitReply(ctx context.Context, causal struct {
