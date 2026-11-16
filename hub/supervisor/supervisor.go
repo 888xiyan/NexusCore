@@ -132,18 +132,22 @@ type manifest struct {
 	pluginID       string
 	pluginBinary   string
 	pluginDigest   string
+	boundAgentCLI  string
+	boundAgentID   string
 }
 
 func (s *Supervisor) loadManifest(ctx context.Context, botID string) (*manifest, error) {
 	var m manifest
 	var cv *int64
 	var parentPlugin *string
+	var rawCaps []byte
 	err := s.st.Pool().QueryRow(ctx, `
 		SELECT m.bot_id, m.binary_path, m.binary_digest, m.activation_mode,
-		       m.idle_ttl_seconds, m.start_timeout_seconds, m.config_version, m.parent_plugin
+		       m.idle_ttl_seconds, m.start_timeout_seconds, m.config_version, m.parent_plugin,
+		       m.capabilities
 		  FROM bot_manifest m JOIN bots b ON b.bot_id = m.bot_id
 		 WHERE m.bot_id=$1 AND b.enabled = true AND b.desired_state='start'`, botID).
-		Scan(&m.botID, &m.binaryPath, &m.binaryDigest, &m.activationMode, &m.idleTTL, &m.startTimeout, &cv, &parentPlugin)
+		Scan(&m.botID, &m.binaryPath, &m.binaryDigest, &m.activationMode, &m.idleTTL, &m.startTimeout, &cv, &parentPlugin, &rawCaps)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, fmt.Errorf("bot %q 未注册或未处于 desired_state=start", botID)
 	}
@@ -152,6 +156,23 @@ func (s *Supervisor) loadManifest(ctx context.Context, botID string) (*manifest,
 	}
 	if cv != nil {
 		m.configVersion = *cv
+	}
+
+	if len(rawCaps) > 0 {
+		var caps []string
+		if err := json.Unmarshal(rawCaps, &caps); err == nil {
+			for _, capItem := range caps {
+				if strings.HasPrefix(capItem, "agent-cli:") {
+					m.boundAgentCLI = strings.TrimPrefix(capItem, "agent-cli:")
+				} else if strings.HasPrefix(capItem, "cli:") {
+					m.boundAgentCLI = strings.TrimPrefix(capItem, "cli:")
+				} else if strings.HasPrefix(capItem, "agent-id:") {
+					m.boundAgentID = strings.TrimPrefix(capItem, "agent-id:")
+				} else if strings.HasPrefix(capItem, "agent:") {
+					m.boundAgentID = strings.TrimPrefix(capItem, "agent:")
+				}
+			}
+		}
 	}
 
 	if parentPlugin != nil && *parentPlugin != "" {
@@ -363,6 +384,12 @@ func (s *Supervisor) startLocked(ctx context.Context, botID string) error {
 			"-plugin-binary", m.pluginBinary,
 			"-plugin-digest", m.pluginDigest,
 		)
+	}
+	if m.boundAgentCLI != "" {
+		args = append(args, "-agent-cli", m.boundAgentCLI)
+	}
+	if m.boundAgentID != "" {
+		args = append(args, "-agent-id", m.boundAgentID)
 	}
 
 	cmd := exec.Command(m.binaryPath, args...)

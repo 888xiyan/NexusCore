@@ -1,0 +1,52 @@
+{
+  "plugin_id": "plugin_bot_creator",
+  "name": "Bot Factory & Agent Binding Plugin",
+  "version": "1.0.0",
+  "plugin_type": "executor",
+  "description": "\u4e13\u804c Bot \u5b9e\u4f8b\u84dd\u56fe\u5b9a\u4e49\u3001\u5408\u89c4\u6821\u9a8c\u3001\u56db\u5c42\u5355\u4f53\u8bb0\u5fc6\u521d\u59cb\u5316\u3001\u672c\u5730 Agent \u7ed1\u5b9a\u4e0e\u751f\u547d\u5468\u671f\u534f\u540c\u63d2\u4ef6",
+  "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_bot_creator",
+  "publishing": [
+    "plugin_bot_creator.bot.created",
+    "plugin_bot_creator.bot.updated"
+  ],
+  "subscribing": [
+    "bot.command.create_bot"
+  ],
+  "providing_tools": [
+    "bot_creator.validate_blueprint",
+    "bot_creator.create_bot",
+    "bot_creator.update_bot",
+    "bot_creator.list_templates",
+    "bot_creator.list_available_agents"
+  ],
+  "requiring_tools": [],
+  "bot_templates": [
+    {
+      "bot_id": "bot_creator_bot",
+      "role": "plugin",
+      "display_name": "Bot Creator Bot",
+      "activation_mode": "resident",
+      "capabilities": [
+        "bot_creation",
+        "blueprint_management"
+      ]
+    }
+  ],
+  "schema_version": 1,
+  "ui": {
+    "menu": {
+      "title": "Bot \u84dd\u56fe\u5de5\u5382",
+      "icon": "UserFilled",
+      "path": "/bot-factory",
+      "order": 3
+    },
+    "routes": [
+      {
+        "path": "/bot-factory",
+        "name": "BotCreator",
+        "entry": "/plugins/bot_creator/dist/index.js"
+      }
+    ]
+  },
+  "binary_digest": "ba1046bb11da759a43628f8b277a7e23e6bfc90b67538764aca3d345f8164f4c"
+}
