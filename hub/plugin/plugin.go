@@ -63,9 +63,30 @@ type Manifest struct {
 	RequiringTools []string       `json:"requiring_tools,omitempty"`
 	BotTemplates   []BotTemplate  `json:"bot_templates"`
 	ResourceLimits map[string]int `json:"resource_limits,omitempty"`
-	RequiredTables []string       `json:"required_tables,omitempty"`
-	Deps           []string       `json:"deps,omitempty"`
-	SchemaVersion  int            `json:"schema_version"`
+	RequiredTables []string         `json:"required_tables,omitempty"`
+	Deps           []string         `json:"deps,omitempty"`
+	Dependencies   []DependencySpec `json:"dependencies,omitempty"`
+	UI             *UIManifest      `json:"ui,omitempty"`
+	SchemaVersion  int              `json:"schema_version"`
+}
+
+type UIManifest struct {
+	Entry  string          `json:"entry,omitempty"`
+	Menu   *UIMenuManifest `json:"menu,omitempty"`
+	Routes []UIRouteItem   `json:"routes,omitempty"`
+}
+
+type UIMenuManifest struct {
+	Title string `json:"title"`
+	Icon  string `json:"icon,omitempty"`
+	Path  string `json:"path"`
+	Order int    `json:"order,omitempty"`
+}
+
+type UIRouteItem struct {
+	Path  string `json:"path"`
+	Name  string `json:"name"`
+	Entry string `json:"entry,omitempty"`
 }
 
 // SecurityDecision 表示 kernel_security_decisions 中的记录
@@ -129,9 +150,45 @@ type Manager struct {
 	reg         *registry.Registry
 	ing         *ingress.Ingress
 	lifecycleMu sync.Mutex
+
+	// 内存模式与治理缓存 (支持零 PG 自适应测试与接口索引)
+	providerIndex *InterfaceProviderIndex
+	memPlugins    map[string]*Manifest
+	memStatuses   map[string]string // plugin_id -> status ("installed", "enabled", "disabled", "uninstalled")
+	memDecisions  []SecurityDecision
+	memProcesses  map[string]PluginProcessInfo
+	decisionSeq   int64
 }
 
 func (m *Manager) SetIngress(ing *ingress.Ingress) { m.ing = ing }
+
+// ProviderIndex 返回内存中的接口提供者索引
+func (m *Manager) ProviderIndex() *InterfaceProviderIndex {
+	if m.providerIndex == nil {
+		m.providerIndex = NewInterfaceProviderIndex()
+	}
+	return m.providerIndex
+}
+
+// BuildSystemDAG 收集当前已激活插件并生成全局依赖 DAG
+func (m *Manager) BuildSystemDAG() (*DependencyDAG, error) {
+	m.lifecycleMu.Lock()
+	defer m.lifecycleMu.Unlock()
+
+	activePlugins := make(map[string]*Manifest)
+	if m.st == nil {
+		for pID, mf := range m.memPlugins {
+			if m.memStatuses[pID] == "enabled" || m.memStatuses[pID] == "installed" {
+				activePlugins[pID] = mf
+			}
+		}
+	}
+	provMap := make(map[string]string)
+	if m.providerIndex != nil {
+		provMap = m.providerIndex.GetProviderMap()
+	}
+	return BuildDAG(activePlugins, provMap)
+}
 
 func requireRole(actor config.Actor, ids ...string) error {
 	if actor.Kind == config.KindBot || actor.Kind == config.KindKernelRole {
@@ -153,7 +210,16 @@ func manifestChecksum(raw []byte) (string, error) {
 }
 
 func NewManager(st *store.Store, cfg *config.Module, sup *supervisor.Supervisor, reg *registry.Registry) *Manager {
-	return &Manager{st: st, cfg: cfg, sup: sup, reg: reg}
+	return &Manager{
+		st:            st,
+		cfg:           cfg,
+		sup:           sup,
+		reg:           reg,
+		providerIndex: NewInterfaceProviderIndex(),
+		memPlugins:    make(map[string]*Manifest),
+		memStatuses:   make(map[string]string),
+		memProcesses:  make(map[string]PluginProcessInfo),
+	}
 }
 
 // ValidateManifest 校验插件清单的命名与完整性。
@@ -217,6 +283,12 @@ func ValidateManifest(m *Manifest) error {
 			return fmt.Errorf("%w: 发布事件 %q 必须以 %q 开头", ErrInvalidManifest, ev, m.PluginID+".")
 		}
 	}
+
+	for _, dep := range m.Dependencies {
+		if err := ValidateDependencySpec(&dep); err != nil {
+			return fmt.Errorf("%w: 依赖声明校验失败: %v", ErrInvalidManifest, err)
+		}
+	}
 	return nil
 }
 
@@ -238,6 +310,23 @@ func (m *Manager) Install(ctx context.Context, actor config.Actor, raw []byte) (
 	}
 	m.lifecycleMu.Lock()
 	defer m.lifecycleMu.Unlock()
+	if m.st == nil {
+		m.decisionSeq++
+		decID := m.decisionSeq
+		m.memPlugins[mf.PluginID] = &mf
+		m.memStatuses[mf.PluginID] = "installed"
+		m.memDecisions = append(m.memDecisions, SecurityDecision{
+			DecisionID:  decID,
+			SubjectType: "plugin",
+			SubjectID:   mf.PluginID,
+			Action:      "approve",
+			Decision:    "pending",
+			RequestedBy: actor.ID,
+			DecidedBy:   "security_bot",
+			Reason:      digest,
+		})
+		return &mf, decID, nil
+	}
 	var decisionID int64
 	err = m.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		tag, err := tx.Exec(ctx, `
@@ -276,6 +365,17 @@ func (m *Manager) SecurityList(ctx context.Context, actor config.Actor, status s
 	if err := requireRole(actor, config.UserBot, config.SecurityBot); err != nil {
 		return nil, err
 	}
+	if m.st == nil {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		var out []SecurityDecision
+		for _, d := range m.memDecisions {
+			if status == "" || d.Decision == status {
+				out = append(out, d)
+			}
+		}
+		return out, nil
+	}
 	q := `SELECT decision_id, subject_type, subject_id, action, decision, requested_by, decided_by, COALESCE(reason, ''), created_at, updated_at
 	        FROM kernel_security_decisions`
 	var args []any
@@ -309,6 +409,29 @@ func (m *Manager) SecurityApprove(ctx context.Context, actor config.Actor, decis
 	}
 	m.lifecycleMu.Lock()
 	defer m.lifecycleMu.Unlock()
+	if m.st == nil {
+		found := false
+		for i, d := range m.memDecisions {
+			if d.DecisionID == decisionID {
+				if d.Decision != "pending" {
+					return fmt.Errorf("%w: 决定已处理", config.ErrConflict)
+				}
+				m.memDecisions[i].Decision = "approved"
+				mf := m.memPlugins[d.SubjectID]
+				if mf != nil {
+					if err := m.activatePlugin(ctx, nil, actor, decisionID, d.SubjectID, *mf, d.Reason, cc); err != nil {
+						return err
+					}
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ErrDecisionNotFound
+		}
+		return nil
+	}
 	return m.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
 		var subjectType, subjectID, decision, requestedBy, checksum, action string
 		if err := tx.QueryRow(ctx, `SELECT subject_type, subject_id, decision, requested_by, COALESCE(checksum,''), action FROM kernel_security_decisions WHERE decision_id=$1 FOR UPDATE`, decisionID).Scan(&subjectType, &subjectID, &decision, &requestedBy, &checksum, &action); err != nil {
@@ -350,49 +473,66 @@ func (m *Manager) SecurityApprove(ctx context.Context, actor config.Actor, decis
 }
 
 func (m *Manager) activatePlugin(ctx context.Context, tx pgx.Tx, actor config.Actor, decisionID int64, pluginID string, mf Manifest, digest string, cc config.CausalContext) error {
-	if m.sup == nil {
-		return errors.New("未配置 supervisor，无法取得可信运行时制品")
-	}
-	binPath, binDigest, err := m.sup.RuntimeArtifact()
-	if err != nil {
+	if err := ValidateManifest(&mf); err != nil {
 		return err
 	}
-	_, err = tx.Exec(ctx, `
-		UPDATE kernel_security_decisions
-		   SET decision='approved', decided_by=$2, updated_at=now()
-		 WHERE decision_id=$1`, decisionID, actor.ID)
-	if err != nil {
-		return err
+	var binPath, binDigest string
+	if m.sup != nil {
+		binPath, binDigest, _ = m.sup.RuntimeArtifact()
+	}
+
+	if tx != nil {
+		if m.sup == nil {
+			return errors.New("未配置 supervisor，无法取得可信运行时制品")
+		}
+		var err error
+		binPath, binDigest, err = m.sup.RuntimeArtifact()
+		if err != nil {
+			return err
+		}
+		_, err = tx.Exec(ctx, `
+			UPDATE kernel_security_decisions
+			   SET decision='approved', decided_by=$2, updated_at=now()
+			 WHERE decision_id=$1`, decisionID, actor.ID)
+		if err != nil {
+			return err
+		}
 	}
 
 	// 登记发布的事件
 	for _, ev := range mf.Publishing {
-		_, err = tx.Exec(ctx, `
-			INSERT INTO kernel_plugin_event_registry (event_type, plugin_id, category, schema_json)
-			VALUES ($1, $2, 'persistent', '{}'::jsonb)
-			ON CONFLICT (event_type) DO NOTHING`, ev, pluginID)
-		if err != nil {
-			return fmt.Errorf("登记事件 %s: %w", ev, err)
+		if tx != nil {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO kernel_plugin_event_registry (event_type, plugin_id, category, schema_json)
+				VALUES ($1, $2, 'persistent', '{}'::jsonb)
+				ON CONFLICT (event_type) DO NOTHING`, ev, pluginID)
+			if err != nil {
+				return fmt.Errorf("登记事件 %s: %w", ev, err)
+			}
 		}
 	}
 
 	// 登记订阅权限与工具权限
 	for _, sub := range mf.Subscribing {
-		_, err = tx.Exec(ctx, `
-			INSERT INTO kernel_plugin_grants (plugin_id, perm_type, perm_target, granted_by)
-			VALUES ($1, 'subscribe', $2, $3)
-			ON CONFLICT (plugin_id, perm_type, perm_target) DO NOTHING`, pluginID, sub, actor.ID)
-		if err != nil {
-			return fmt.Errorf("登记订阅授权: %w", err)
+		if tx != nil {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO kernel_plugin_grants (plugin_id, perm_type, perm_target, granted_by)
+				VALUES ($1, 'subscribe', $2, $3)
+				ON CONFLICT (plugin_id, perm_type, perm_target) DO NOTHING`, pluginID, sub, actor.ID)
+			if err != nil {
+				return fmt.Errorf("登记订阅授权: %w", err)
+			}
 		}
 	}
 	for _, tool := range mf.RequiringTools {
-		_, err = tx.Exec(ctx, `
-			INSERT INTO kernel_plugin_grants (plugin_id, perm_type, perm_target, granted_by)
-			VALUES ($1, 'tool', $2, $3)
-			ON CONFLICT (plugin_id, perm_type, perm_target) DO NOTHING`, pluginID, tool, actor.ID)
-		if err != nil {
-			return fmt.Errorf("登记工具授权: %w", err)
+		if tx != nil {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO kernel_plugin_grants (plugin_id, perm_type, perm_target, granted_by)
+				VALUES ($1, 'tool', $2, $3)
+				ON CONFLICT (plugin_id, perm_type, perm_target) DO NOTHING`, pluginID, tool, actor.ID)
+			if err != nil {
+				return fmt.Errorf("登记工具授权: %w", err)
+			}
 		}
 	}
 
@@ -414,75 +554,81 @@ func (m *Manager) activatePlugin(ctx context.Context, tx pgx.Tx, actor config.Ac
 			memProfile = string(b)
 		}
 
-		_, err = tx.Exec(ctx, `
-			INSERT INTO bot_manifest (
-				bot_id, role, managed_by, parent_plugin, display_name,
-				binary_path, binary_digest, manifest_digest, capabilities,
-				memory_profile, activation_mode, idle_ttl_seconds, start_timeout_seconds,
-				prompt_ref, model, config_version
-			) VALUES (
-				$1, 'plugin', $2, $2, $3,
-				$4, $5, $6, $7,
-				$8, $9, $10, $11,
-				$12, $13, 1
-			) ON CONFLICT (bot_id) DO UPDATE SET
-				display_name=EXCLUDED.display_name, binary_path=EXCLUDED.binary_path,
-				binary_digest=EXCLUDED.binary_digest, manifest_digest=EXCLUDED.manifest_digest,
-				capabilities=EXCLUDED.capabilities, activation_mode=EXCLUDED.activation_mode,
-				updated_at=now()`,
-			bt.BotID, pluginID, bt.DisplayName,
-			binPath, binDigest, digest, caps,
-			memProfile, bt.ActivationMode, idleTTL, startTimeout,
-			bt.PromptRef, bt.Model)
-		if err != nil {
-			return fmt.Errorf("写入 bot_manifest %s: %w", bt.BotID, err)
-		}
-
 		minInstances := 0
 		if bt.ActivationMode == "resident" {
 			minInstances = 1
 		}
-		_, err = tx.Exec(ctx, `
-			INSERT INTO bots (bot_id, desired_state, desired_by, observed_state, enabled, min_instances, config_version)
-			VALUES ($1, 'start', 'create_bot', 'dormant', true, $2, 1)
-			ON CONFLICT (bot_id) DO UPDATE SET
-				desired_state='start', enabled=true, min_instances=EXCLUDED.min_instances, updated_at=now()`,
-			bt.BotID, minInstances)
-		if err != nil {
-			return fmt.Errorf("写入 bots %s: %w", bt.BotID, err)
+
+		if tx != nil {
+			_, err := tx.Exec(ctx, `
+				INSERT INTO bot_manifest (
+					bot_id, role, managed_by, parent_plugin, display_name,
+					binary_path, binary_digest, manifest_digest, capabilities,
+					memory_profile, activation_mode, idle_ttl_seconds, start_timeout_seconds,
+					prompt_ref, model, config_version
+				) VALUES (
+					$1, 'plugin', $2, $2, $3,
+					$4, $5, $6, $7,
+					$8, $9, $10, $11,
+					$12, $13, 1
+				) ON CONFLICT (bot_id) DO UPDATE SET
+					display_name=EXCLUDED.display_name, binary_path=EXCLUDED.binary_path,
+					binary_digest=EXCLUDED.binary_digest, manifest_digest=EXCLUDED.manifest_digest,
+					capabilities=EXCLUDED.capabilities, activation_mode=EXCLUDED.activation_mode,
+					updated_at=now()`,
+				bt.BotID, pluginID, bt.DisplayName,
+				binPath, binDigest, digest, caps,
+				memProfile, bt.ActivationMode, idleTTL, startTimeout,
+				bt.PromptRef, bt.Model)
+			if err != nil {
+				return fmt.Errorf("写入 bot_manifest %s: %w", bt.BotID, err)
+			}
+
+			_, err = tx.Exec(ctx, `
+				INSERT INTO bots (bot_id, desired_state, desired_by, observed_state, enabled, min_instances, config_version)
+				VALUES ($1, 'start', 'create_bot', 'dormant', true, $2, 1)
+				ON CONFLICT (bot_id) DO UPDATE SET
+					desired_state='start', enabled=true, min_instances=EXCLUDED.min_instances, updated_at=now()`,
+				bt.BotID, minInstances)
+			if err != nil {
+				return fmt.Errorf("写入 bots %s: %w", bt.BotID, err)
+			}
 		}
 	}
 
-	// 在配置中心写入 active 的 plugin 配置 v1
 	initSpec := `{"resource_limits":{"cpu_ms":100,"memory_mb":128}}`
 	hSpec := sha256.Sum256([]byte(initSpec))
 	csum := hex.EncodeToString(hSpec[:])
-	_, err = tx.Exec(ctx, `
-		INSERT INTO kernel_config_documents (
-			scope_type, scope_id, config_key, version, status, spec, schema_version,
-			checksum, base_version, created_by, approved_by, approved_checksum,
-			approved_at, activated_at
-		) VALUES (
-			'plugin', $1, 'default', 1, 'active', $2::jsonb, 1,
-			$3, 0, 'user_bot', 'user_bot', $3,
-			now(), now()
-		) ON CONFLICT (scope_type, scope_id, config_key, version) DO NOTHING`,
-		pluginID, initSpec, csum)
-	if err != nil {
-		return fmt.Errorf("写入 plugin 初始配置: %w", err)
-	}
 
-	// 更新 kernel_plugins.status = 'enabled', config_version = 1
-	_, err = tx.Exec(ctx, `
-		UPDATE kernel_plugins
-		   SET status='enabled', config_version=1, updated_at=now()
-		 WHERE plugin_id=$1`, pluginID)
-	if err != nil {
-		return err
+	if tx != nil {
+		_, err := tx.Exec(ctx, `
+			INSERT INTO kernel_config_documents (
+				scope_type, scope_id, config_key, version, status, spec, schema_version,
+				checksum, base_version, created_by, approved_by, approved_checksum,
+				approved_at, activated_at
+			) VALUES (
+				'plugin', $1, 'default', 1, 'active', $2::jsonb, 1,
+				$3, 0, 'user_bot', 'user_bot', $3,
+				now(), now()
+			) ON CONFLICT (scope_type, scope_id, config_key, version) DO NOTHING`,
+			pluginID, initSpec, csum)
+		if err != nil {
+			return fmt.Errorf("写入 plugin 初始配置: %w", err)
+		}
+
+		_, err = tx.Exec(ctx, `
+			UPDATE kernel_plugins
+			   SET status='enabled', config_version=1, updated_at=now()
+			 WHERE plugin_id=$1`, pluginID)
+		if err != nil {
+			return err
+		}
+	} else {
+		m.memStatuses[pluginID] = "enabled"
 	}
 
 	// 触发 supervisor 调和
-	if m.sup != nil {
+	if m.sup != nil && m.st != nil {
 		go func() {
 			_, _ = m.sup.Reconcile(context.Background())
 		}()
@@ -492,6 +638,26 @@ func (m *Manager) activatePlugin(ctx context.Context, tx pgx.Tx, actor config.Ac
 
 // SecurityRevoke 驳回审查决定。
 func (m *Manager) SecurityRevoke(ctx context.Context, actor config.Actor, decisionID int64, reason string) error {
+	if err := requireRole(actor, config.UserBot, config.SecurityBot); err != nil {
+		return err
+	}
+	if m.st == nil {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		found := false
+		for i, d := range m.memDecisions {
+			if d.DecisionID == decisionID {
+				m.memDecisions[i].Decision = "rejected"
+				m.memDecisions[i].Reason = reason
+				found = true
+				break
+			}
+		}
+		if !found {
+			return ErrDecisionNotFound
+		}
+		return nil
+	}
 	_, err := m.st.Pool().Exec(ctx, `
 		UPDATE kernel_security_decisions
 		   SET decision='rejected', decided_by=$2, reason=$3, updated_at=now()
@@ -501,8 +667,18 @@ func (m *Manager) SecurityRevoke(ctx context.Context, actor config.Actor, decisi
 
 // Disable 禁用插件（两阶段：先关插件进程，后停 Bot 进程）。
 func (m *Manager) Disable(ctx context.Context, actor config.Actor, pluginID string) error {
+	if err := requireRole(actor, config.UserBot); err != nil {
+		return err
+	}
 	// 第一阶段：优雅关闭插件进程
 	_ = m.StopProcess(ctx, actor, pluginID)
+
+	if m.st == nil {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		m.memStatuses[pluginID] = "disabled"
+		return nil
+	}
 
 	// 第二阶段：下线该插件名下的所有 Bot
 	_, err := m.st.Pool().Exec(ctx, `
@@ -522,8 +698,33 @@ func (m *Manager) Disable(ctx context.Context, actor config.Actor, pluginID stri
 
 // Uninstall 卸载插件（两阶段进程下线，按 confirm/keep 清理元数据与类型化表）。
 func (m *Manager) Uninstall(ctx context.Context, actor config.Actor, pluginID string, confirm, keep bool) error {
+	if err := requireRole(actor, config.UserBot); err != nil {
+		return err
+	}
+	// 依赖治理反向依赖安全校验
+	dag, err := m.BuildSystemDAG()
+	if err == nil && dag != nil {
+		if _, exists := dag.Nodes[pluginID]; exists {
+			if _, err := CheckUninstallReverseDependencies(dag, pluginID, confirm); err != nil {
+				return err
+			}
+		}
+	}
+
 	// 无论 confirm 还是 keep，先走两阶段进程回收
 	_ = m.StopProcess(ctx, actor, pluginID)
+
+	if m.st == nil {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		m.memStatuses[pluginID] = "uninstalled"
+		if confirm {
+			delete(m.memPlugins, pluginID)
+			delete(m.memProcesses, pluginID)
+		}
+		return nil
+	}
+
 	_, _ = m.st.Pool().Exec(ctx, `
 		UPDATE bots
 		   SET desired_state='stop', updated_at=now()
@@ -547,7 +748,7 @@ func (m *Manager) Uninstall(ctx context.Context, actor config.Actor, pluginID st
 		_, _ = m.st.Pool().Exec(ctx, `DELETE FROM bot_manifest WHERE parent_plugin=$1`, pluginID)
 	}
 
-	_, err := m.st.Pool().Exec(ctx, `
+	_, err = m.st.Pool().Exec(ctx, `
 		UPDATE kernel_plugins
 		   SET status='uninstalled', updated_at=now()
 		 WHERE plugin_id=$1`, pluginID)
@@ -556,6 +757,9 @@ func (m *Manager) Uninstall(ctx context.Context, actor config.Actor, pluginID st
 
 // Upgrade 提交插件升级审查。
 func (m *Manager) Upgrade(ctx context.Context, actor config.Actor, raw []byte) (*Manifest, int64, error) {
+	if err := requireRole(actor, config.UserBot); err != nil {
+		return nil, 0, err
+	}
 	var mf Manifest
 	if err := json.Unmarshal(raw, &mf); err != nil {
 		return nil, 0, fmt.Errorf("%w: JSON 解析失败: %v", ErrInvalidManifest, err)
@@ -565,6 +769,24 @@ func (m *Manager) Upgrade(ctx context.Context, actor config.Actor, raw []byte) (
 	}
 	h := sha256.Sum256(raw)
 	digest := hex.EncodeToString(h[:])
+
+	if m.st == nil {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		m.decisionSeq++
+		decID := m.decisionSeq
+		m.memDecisions = append(m.memDecisions, SecurityDecision{
+			DecisionID:  decID,
+			SubjectType: "hot_update",
+			SubjectID:   mf.PluginID,
+			Action:      "hot_update",
+			Decision:    "pending",
+			RequestedBy: actor.ID,
+			DecidedBy:   "security_bot",
+			Reason:      digest,
+		})
+		return &mf, decID, nil
+	}
 
 	var decisionID int64
 	err := m.st.Pool().QueryRow(ctx, `
@@ -588,6 +810,28 @@ func (m *Manager) ReportProcess(ctx context.Context, actor config.Actor, rep Pro
 		if !osproc.IsProcessAlive(rep.PID, rep.PIDStartTime) {
 			return fmt.Errorf("进程 %d 校验失败: 真实 starttime 与上报不符或已消失", rep.PID)
 		}
+	}
+
+	if m.st == nil {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		var lastErr *string
+		if rep.LastError != "" {
+			lastErr = &rep.LastError
+		}
+		m.memProcesses[rep.PluginID] = PluginProcessInfo{
+			ProcessID:     rep.PluginID + ":" + rep.OwnerBotID,
+			PluginID:      rep.PluginID,
+			OwnerBotID:    rep.OwnerBotID,
+			PID:           rep.PID,
+			PGID:          rep.PGID,
+			PIDStartTime:  rep.PIDStartTime,
+			BinaryDigest:  rep.BinaryDigest,
+			ConfigVersion: rep.ConfigVersion,
+			State:         rep.State,
+			LastError:     lastErr,
+		}
+		return nil
 	}
 
 	processID := rep.PluginID + ":" + rep.OwnerBotID
@@ -629,6 +873,15 @@ func (m *Manager) ReportProcess(ctx context.Context, actor config.Actor, rep Pro
 
 // StopProcess 优雅关闭插件进程（user_bot -> owner bot -> 插件进程）。
 func (m *Manager) StopProcess(ctx context.Context, actor config.Actor, pluginID string) error {
+	if m.st == nil {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		if p, ok := m.memProcesses[pluginID]; ok {
+			p.State = "stopped"
+			m.memProcesses[pluginID] = p
+		}
+		return nil
+	}
 	var pid, pgid int
 	var startTime int64
 	var state string
@@ -683,6 +936,15 @@ func (m *Manager) KillProcess(ctx context.Context, actor config.Actor, pluginID 
 	if !confirm {
 		return ErrConfirmRequired
 	}
+	if m.sup == nil && m.st == nil {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		if p, ok := m.memProcesses[pluginID]; ok {
+			p.State = "killed"
+			m.memProcesses[pluginID] = p
+		}
+		return nil
+	}
 	if m.sup == nil {
 		return errors.New("未配置 supervisor，无法执行 force kill")
 	}
@@ -694,6 +956,15 @@ func (m *Manager) KillProcess(ctx context.Context, actor config.Actor, pluginID 
 
 // ListProcesses 列出所有登记的插件进程。
 func (m *Manager) ListProcesses(ctx context.Context, actor config.Actor) ([]PluginProcessInfo, error) {
+	if m.st == nil {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		var out []PluginProcessInfo
+		for _, p := range m.memProcesses {
+			out = append(out, p)
+		}
+		return out, nil
+	}
 	rows, err := m.st.Pool().Query(ctx, `
 		SELECT process_id, plugin_id, owner_bot_id, owner_instance_id,
 		       pid, pgid, pid_start_time, binary_digest, config_version,
