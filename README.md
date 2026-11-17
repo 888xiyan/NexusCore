@@ -95,8 +95,9 @@ make build-plugins
 # 启动本地 PostgreSQL 容器（默认端口 55432）
 make compose-up
 
-# 执行数据库初始化迁移
+# 执行数据库初始化迁移：运行角色 nexus_kernel 无 DDL 权限，迁移必须使用 nexus_migrator
 export NEXUS_PG_KERNEL_DSN="postgres://nexus_kernel:nexus_dev_kernel@127.0.0.1:55432/nexus"
+export NEXUS_PG_MIGRATE_DSN="postgres://nexus_migrator:nexus_dev_migrate@127.0.0.1:55432/nexus"
 make migrate-up
 ```
 

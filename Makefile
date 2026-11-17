@@ -66,7 +66,8 @@ proto:
 	@which protoc-gen-go-grpc >/dev/null 2>&1 || { echo "protoc-gen-go-grpc 未安装"; exit 1; }
 	buf generate
 
-# 内核库：使用 NEXUS_PG_KERNEL_DSN（运行角色）指向 PostgreSQL；迁移 DSN 可选（NEXUS_PG_MIGRATE_DSN，未设置时回退运行 DSN）。
+# 内核库：使用 NEXUS_PG_KERNEL_DSN（运行角色）指向 PostgreSQL；迁移使用 NEXUS_PG_MIGRATE_DSN
+# （未设置时回退运行 DSN；默认部署的运行角色无 DDL 权限，请显式指定迁移角色）。
 # 插件库（memory / vault）的迁移属于插件 install / upgrade 流程（M2/M3），不走本 Makefile。
 migrate-probe:
 	@if [ -z "$$NEXUS_PG_KERNEL_DSN" ]; then \
