@@ -3,6 +3,7 @@
   "name": "Bot Factory & Agent Binding Plugin",
   "version": "1.0.0",
   "plugin_type": "executor",
+  "plugin_category": "foundation",
   "description": "\u4e13\u804c Bot \u5b9e\u4f8b\u84dd\u56fe\u5b9a\u4e49\u3001\u5408\u89c4\u6821\u9a8c\u3001\u56db\u5c42\u5355\u4f53\u8bb0\u5fc6\u521d\u59cb\u5316\u3001\u672c\u5730 Agent \u7ed1\u5b9a\u4e0e\u751f\u547d\u5468\u671f\u534f\u540c\u63d2\u4ef6",
   "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_bot_creator",
   "publishing": [

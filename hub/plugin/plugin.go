@@ -49,20 +49,21 @@ type BotTemplate struct {
 }
 
 type Manifest struct {
-	PluginID       string         `json:"plugin_id"`
-	Name           string         `json:"name"`
-	Version        string         `json:"version"`
-	PluginType     string         `json:"plugin_type"` // ingress, workspace, executor, knowledge
-	Description    string         `json:"description,omitempty"`
-	Entry          string         `json:"entry,omitempty"`
-	Binary         string         `json:"binary,omitempty"`
-	BinaryDigest   string         `json:"binary_digest,omitempty"`
-	Subscribing    []string       `json:"subscribing,omitempty"`
-	Publishing     []string       `json:"publishing,omitempty"`
-	ProvidingTools []string       `json:"providing_tools,omitempty"`
-	RequiringTools []string       `json:"requiring_tools,omitempty"`
-	BotTemplates   []BotTemplate  `json:"bot_templates"`
-	ResourceLimits map[string]int `json:"resource_limits,omitempty"`
+	PluginID       string           `json:"plugin_id"`
+	Name           string           `json:"name"`
+	Version        string           `json:"version"`
+	PluginType     string           `json:"plugin_type"`               // ingress, workspace, executor, knowledge
+	PluginCategory string           `json:"plugin_category,omitempty"` // foundation, business, tool, theme, bot_pack；空值保持旧清单合法
+	Description    string           `json:"description,omitempty"`
+	Entry          string           `json:"entry,omitempty"`
+	Binary         string           `json:"binary,omitempty"`
+	BinaryDigest   string           `json:"binary_digest,omitempty"`
+	Subscribing    []string         `json:"subscribing,omitempty"`
+	Publishing     []string         `json:"publishing,omitempty"`
+	ProvidingTools []string         `json:"providing_tools,omitempty"`
+	RequiringTools []string         `json:"requiring_tools,omitempty"`
+	BotTemplates   []BotTemplate    `json:"bot_templates"`
+	ResourceLimits map[string]int   `json:"resource_limits,omitempty"`
 	RequiredTables []string         `json:"required_tables,omitempty"`
 	Deps           []string         `json:"deps,omitempty"`
 	Dependencies   []DependencySpec `json:"dependencies,omitempty"`
@@ -157,6 +158,7 @@ type Manager struct {
 	memStatuses   map[string]string // plugin_id -> status ("installed", "enabled", "disabled", "uninstalled")
 	memDecisions  []SecurityDecision
 	memProcesses  map[string]PluginProcessInfo
+	memAudits     []LifecycleRecord
 	decisionSeq   int64
 }
 
@@ -232,8 +234,8 @@ func ValidateManifest(m *Manifest) error {
 	default:
 		return fmt.Errorf("%w: 不支持的 plugin_type %q", ErrInvalidManifest, m.PluginType)
 	}
-	if len(m.BotTemplates) == 0 {
-		return fmt.Errorf("%w: bot_templates 不能为空（至少包含一个 owner bot）", ErrInvalidManifest)
+	if err := validateCategory(m); err != nil {
+		return err
 	}
 
 	reservedBots := map[string]bool{
@@ -292,25 +294,38 @@ func ValidateManifest(m *Manifest) error {
 	return nil
 }
 
-// Install 安装插件制品并提交 security 审查。
+// Install 安装插件制品并提交 security 审查。成功与失败都追加生命周期留底。
 func (m *Manager) Install(ctx context.Context, actor config.Actor, raw []byte) (*Manifest, int64, error) {
+	pluginID := peekPluginID(raw)
+	base := LifecycleRecord{PluginID: pluginID, Action: "install", Actor: actor.ID}
 	if err := requireRole(actor, config.UserBot); err != nil {
-		return nil, 0, err
+		return nil, 0, m.failLifecycle(ctx, base, err)
 	}
 	var mf Manifest
 	if err := json.Unmarshal(raw, &mf); err != nil {
-		return nil, 0, fmt.Errorf("%w: JSON 解析失败: %v", ErrInvalidManifest, err)
+		return nil, 0, m.failLifecycle(ctx, base, fmt.Errorf("%w: JSON 解析失败: %v", ErrInvalidManifest, err))
 	}
+	base.PluginID = mf.PluginID
 	if err := ValidateManifest(&mf); err != nil {
-		return nil, 0, err
+		return nil, 0, m.failLifecycle(ctx, base, err)
 	}
 	digest, err := manifestChecksum(raw)
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, m.failLifecycle(ctx, base, err)
+	}
+	base.Digest = digest
+	if err := checkBinaryDigest(&mf); err != nil {
+		return nil, 0, m.failLifecycle(ctx, base, err)
 	}
 	m.lifecycleMu.Lock()
 	defer m.lifecycleMu.Unlock()
 	if m.st == nil {
+		if err := m.checkCandidateDepth(ctx, &mf); err != nil {
+			base.Result = "rejected"
+			base.Reason = err.Error()
+			m.appendLifecycle(base)
+			return nil, 0, err
+		}
 		m.decisionSeq++
 		decID := m.decisionSeq
 		m.memPlugins[mf.PluginID] = &mf
@@ -325,7 +340,13 @@ func (m *Manager) Install(ctx context.Context, actor config.Actor, raw []byte) (
 			DecidedBy:   "security_bot",
 			Reason:      digest,
 		})
+		base.Result = "ok"
+		base.Reason = "已提交 security 审查"
+		m.appendLifecycle(base)
 		return &mf, decID, nil
+	}
+	if err := m.checkCandidateDepth(ctx, &mf); err != nil {
+		return nil, 0, m.failLifecycle(ctx, base, err)
 	}
 	var decisionID int64
 	err = m.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
@@ -352,10 +373,13 @@ func (m *Manager) Install(ctx context.Context, actor config.Actor, raw []byte) (
 			VALUES ('plugin',$1,'approve','pending',$2,'security_bot',$3) RETURNING decision_id`, mf.PluginID, actor.ID, digest).Scan(&decisionID); err != nil {
 			return fmt.Errorf("提交 security 审查: %w", err)
 		}
-		return nil
+		ok := base
+		ok.Result = "ok"
+		ok.Reason = "已提交 security 审查"
+		return m.persistLifecycle(ctx, tx, ok)
 	})
 	if err != nil {
-		return nil, 0, err
+		return nil, 0, m.failLifecycle(ctx, base, err)
 	}
 	return &mf, decisionID, nil
 }
@@ -667,8 +691,9 @@ func (m *Manager) SecurityRevoke(ctx context.Context, actor config.Actor, decisi
 
 // Disable 禁用插件（两阶段：先关插件进程，后停 Bot 进程）。
 func (m *Manager) Disable(ctx context.Context, actor config.Actor, pluginID string) error {
+	base := LifecycleRecord{PluginID: pluginID, Action: "disable", Actor: actor.ID}
 	if err := requireRole(actor, config.UserBot); err != nil {
-		return err
+		return m.failLifecycle(ctx, base, err)
 	}
 	// 第一阶段：优雅关闭插件进程
 	_ = m.StopProcess(ctx, actor, pluginID)
@@ -677,6 +702,8 @@ func (m *Manager) Disable(ctx context.Context, actor config.Actor, pluginID stri
 		m.lifecycleMu.Lock()
 		defer m.lifecycleMu.Unlock()
 		m.memStatuses[pluginID] = "disabled"
+		base.Result = "ok"
+		m.appendLifecycle(base)
 		return nil
 	}
 
@@ -689,24 +716,32 @@ func (m *Manager) Disable(ctx context.Context, actor config.Actor, pluginID stri
 		return fmt.Errorf("下线 Bot 进程: %w", err)
 	}
 
-	_, err = m.st.Pool().Exec(ctx, `
+	tag, err := m.st.Pool().Exec(ctx, `
 		UPDATE kernel_plugins
 		   SET status='disabled', updated_at=now()
 		 WHERE plugin_id=$1`, pluginID)
-	return err
+	if err != nil {
+		return m.failLifecycle(ctx, base, fmt.Errorf("禁用插件: %w", err))
+	}
+	if tag.RowsAffected() != 1 {
+		return m.failLifecycle(ctx, base, fmt.Errorf("%w: %s", ErrPluginNotFound, pluginID))
+	}
+	base.Result = "ok"
+	return m.recordLifecycle(ctx, base)
 }
 
 // Uninstall 卸载插件（两阶段进程下线，按 confirm/keep 清理元数据与类型化表）。
 func (m *Manager) Uninstall(ctx context.Context, actor config.Actor, pluginID string, confirm, keep bool) error {
+	base := LifecycleRecord{PluginID: pluginID, Action: "uninstall", Actor: actor.ID}
 	if err := requireRole(actor, config.UserBot); err != nil {
-		return err
+		return m.failLifecycle(ctx, base, err)
 	}
 	// 依赖治理反向依赖安全校验
 	dag, err := m.BuildSystemDAG()
 	if err == nil && dag != nil {
 		if _, exists := dag.Nodes[pluginID]; exists {
 			if _, err := CheckUninstallReverseDependencies(dag, pluginID, confirm); err != nil {
-				return err
+				return m.failLifecycle(ctx, base, err)
 			}
 		}
 	}
@@ -722,6 +757,8 @@ func (m *Manager) Uninstall(ctx context.Context, actor config.Actor, pluginID st
 			delete(m.memPlugins, pluginID)
 			delete(m.memProcesses, pluginID)
 		}
+		base.Result = "ok"
+		m.appendLifecycle(base)
 		return nil
 	}
 
@@ -748,27 +785,44 @@ func (m *Manager) Uninstall(ctx context.Context, actor config.Actor, pluginID st
 		_, _ = m.st.Pool().Exec(ctx, `DELETE FROM bot_manifest WHERE parent_plugin=$1`, pluginID)
 	}
 
-	_, err = m.st.Pool().Exec(ctx, `
+	tag, err := m.st.Pool().Exec(ctx, `
 		UPDATE kernel_plugins
 		   SET status='uninstalled', updated_at=now()
 		 WHERE plugin_id=$1`, pluginID)
-	return err
+	if err != nil {
+		return m.failLifecycle(ctx, base, fmt.Errorf("卸载插件: %w", err))
+	}
+	if tag.RowsAffected() != 1 {
+		return m.failLifecycle(ctx, base, fmt.Errorf("%w: %s", ErrPluginNotFound, pluginID))
+	}
+	base.Result = "ok"
+	return m.recordLifecycle(ctx, base)
 }
 
 // Upgrade 提交插件升级审查。
 func (m *Manager) Upgrade(ctx context.Context, actor config.Actor, raw []byte) (*Manifest, int64, error) {
+	pluginID := peekPluginID(raw)
+	base := LifecycleRecord{PluginID: pluginID, Action: "upgrade", Actor: actor.ID}
 	if err := requireRole(actor, config.UserBot); err != nil {
-		return nil, 0, err
+		return nil, 0, m.failLifecycle(ctx, base, err)
 	}
 	var mf Manifest
 	if err := json.Unmarshal(raw, &mf); err != nil {
-		return nil, 0, fmt.Errorf("%w: JSON 解析失败: %v", ErrInvalidManifest, err)
+		return nil, 0, m.failLifecycle(ctx, base, fmt.Errorf("%w: JSON 解析失败: %v", ErrInvalidManifest, err))
 	}
+	base.PluginID = mf.PluginID
 	if err := ValidateManifest(&mf); err != nil {
-		return nil, 0, err
+		return nil, 0, m.failLifecycle(ctx, base, err)
+	}
+	if err := checkBinaryDigest(&mf); err != nil {
+		return nil, 0, m.failLifecycle(ctx, base, err)
+	}
+	if err := m.checkCandidateDepth(ctx, &mf); err != nil {
+		return nil, 0, m.failLifecycle(ctx, base, err)
 	}
 	h := sha256.Sum256(raw)
 	digest := hex.EncodeToString(h[:])
+	base.Digest = digest
 
 	if m.st == nil {
 		m.lifecycleMu.Lock()
@@ -785,6 +839,9 @@ func (m *Manager) Upgrade(ctx context.Context, actor config.Actor, raw []byte) (
 			DecidedBy:   "security_bot",
 			Reason:      digest,
 		})
+		base.Result = "ok"
+		base.Reason = "已提交升级审查"
+		m.appendLifecycle(base)
 		return &mf, decID, nil
 	}
 
@@ -794,7 +851,12 @@ func (m *Manager) Upgrade(ctx context.Context, actor config.Actor, raw []byte) (
 		VALUES ('hot_update', $1, 'hot_update', 'pending', $2, 'security_bot', $3)
 		RETURNING decision_id`, mf.PluginID, actor.ID, digest).Scan(&decisionID)
 	if err != nil {
-		return nil, 0, fmt.Errorf("提交升级审查: %w", err)
+		return nil, 0, m.failLifecycle(ctx, base, fmt.Errorf("提交升级审查: %w", err))
+	}
+	base.Result = "ok"
+	base.Reason = "已提交升级审查"
+	if err := m.recordLifecycle(ctx, base); err != nil {
+		return nil, 0, err
 	}
 	return &mf, decisionID, nil
 }

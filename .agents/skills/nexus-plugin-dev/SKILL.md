@@ -64,6 +64,7 @@ description: >-
   "name": "GroupChat Plugin",
   "version": "1.0.0",
   "plugin_type": "workspace",
+  "plugin_category": "foundation",
   "description": "多 Bot 独立群聊协作插件",
   "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_groupchat",
   "publishing": [
@@ -95,12 +96,12 @@ description: >-
 
 ### 必守校验规则清单：
 1. **`plugin_id`**：必须匹配正则 `^plugin_[a-z0-9_]{3,24}$`。
-2. **`plugin_type`**：只能为 `workspace`、`ingress`、`executor` 或 `knowledge`。
+2. **`plugin_type`**：只能为 `workspace`、`ingress`、`executor` 或 `knowledge`。产品分类写在 `plugin_category`：`foundation`、`business`、`tool`、`theme`、`bot_pack`。不要把产品分类写进 `plugin_type`。
 3. **`publishing`（事件前缀约束）**：**所有发布的事件名称必须严格以 `<plugin_id>.` 开头**（例如 `plugin_groupchat.message.bot`），严禁跨命名空间乱发。
 4. **`binary` 与 `binary_digest`（制品强校验）**：
    - 必须提供可执行文件的绝对路径；
    - 必须提供 64 位小写 SHA256 十六进制摘要，内核在安装与启动前进行哈希强匹配。
-5. **`bot_templates`**：数组不能为空；`bot_templates[0]` 约定为该插件的 **Owner Bot**。
+5. **`bot_templates`**：`foundation`、`business`、`tool` 以及未填 `plugin_category` 的清单不能为空，`bot_templates[0]` 是 **Owner Bot**。`theme` 与 `bot_pack` 不注册 Bot，也不填写 `binary`。
 
 ---
 

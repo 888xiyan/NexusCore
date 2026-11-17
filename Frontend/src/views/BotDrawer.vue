@@ -3,6 +3,7 @@ import { ref, computed, watch } from 'vue'
 import { useBotsStore } from '../stores/bots'
 import { ElMessage } from 'element-plus'
 import { Cpu, Refresh, WarningFilled, Document, User } from '@element-plus/icons-vue'
+import { identityLabel } from '../api/bots'
 
 const botsStore = useBotsStore()
 
@@ -67,6 +68,10 @@ const handleSaveAndRestart = async () => {
             <div class="info-row">
               <span class="info-label">显示名称:</span>
               <span class="info-val">{{ botsStore.selectedBotDetail.display_name }}</span>
+            </div>
+            <div class="info-row">
+              <span class="info-label">身份:</span>
+              <el-tag size="small" type="primary">{{ identityLabel(botsStore.selectedBotDetail.identity) || '未标注' }}</el-tag>
             </div>
             <div class="info-row">
               <span class="info-label">角色定位:</span>

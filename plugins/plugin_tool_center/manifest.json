@@ -3,6 +3,7 @@
   "name": "Tool Center & Skill Engine Plugin",
   "version": "1.0.0",
   "plugin_type": "workspace",
+  "plugin_category": "foundation",
   "description": "系统不可编辑工具、可编辑 Skill 增删改查、外部 MCP 沙盒隔离管理与 Bot-Tool 授权矩阵核心插件",
   "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_tool_center",
   "publishing": [

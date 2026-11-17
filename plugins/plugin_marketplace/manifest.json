@@ -3,6 +3,7 @@
   "name": "Nexus Marketplace & Approval Plugin",
   "version": "1.0.0",
   "plugin_type": "workspace",
+  "plugin_category": "foundation",
   "description": "插件商场浏览检索、下载 SHA256 强校验、安装 Tier 2 HITL 审批与逆拓扑级联卸载三阶段闭环插件",
   "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_marketplace",
   "publishing": [

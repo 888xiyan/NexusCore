@@ -3,6 +3,7 @@
   "name": "Local Agent Discovery Plugin",
   "version": "1.0.0",
   "plugin_type": "executor",
+  "plugin_category": "foundation",
   "description": "\u672c\u5730\u5bbf\u4e3b\u673a Coding Agent \u8d44\u4ea7\u81ea\u52a8\u63a2\u6d4b\u3001\u7248\u672c\u8403\u53d6\u4e0e\u767b\u8bb0\u63d2\u4ef6",
   "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_agent_discovery",
   "publishing": [

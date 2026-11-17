@@ -304,6 +304,7 @@ func (a *API) Handler() http.Handler {
 	// M2: 插件生命周期与两级进程 API
 	mux.HandleFunc("POST /v1/plugins/install", a.handlePluginInstall)
 	mux.HandleFunc("GET /v1/plugins", a.handlePluginList)
+	mux.HandleFunc("GET /v1/plugins/{plugin_id}/lifecycle", a.handlePluginLifecycle)
 	mux.HandleFunc("GET /v1/plugins/security", a.handleSecurityList)
 	mux.HandleFunc("POST /v1/plugins/security/approve", a.handleSecurityApprove)
 	mux.HandleFunc("POST /v1/plugins/security/revoke", a.handleSecurityRevoke)
@@ -1099,6 +1100,8 @@ func (a *API) handleBotList(w http.ResponseWriter, r *http.Request) {
 	type botItem struct {
 		BotID          string          `json:"bot_id"`
 		Role           string          `json:"role"`
+		Identity       string          `json:"identity"`
+		Identities     []string        `json:"identities"`
 		DisplayName    string          `json:"display_name"`
 		ActivationMode string          `json:"activation_mode"`
 		Capabilities   json.RawMessage `json:"capabilities"`
@@ -1108,6 +1111,7 @@ func (a *API) handleBotList(w http.ResponseWriter, r *http.Request) {
 		ObservedState  string          `json:"observed_state"`
 		Enabled        bool            `json:"enabled"`
 	}
+	manifests := a.installedManifests(r.Context())
 	var out []botItem
 	for rows.Next() {
 		var it botItem
@@ -1118,6 +1122,7 @@ func (a *API) handleBotList(w http.ResponseWriter, r *http.Request) {
 			writeErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
+		it.Identity, it.Identities = plugin.ClassifyBotIdentity(it.BotID, it.Role, manifests)
 		out = append(out, it)
 	}
 	writeJSON(w, http.StatusOK, out)
@@ -1251,6 +1256,48 @@ func (a *API) handlePluginInstall(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (a *API) installedManifests(ctx context.Context) []plugin.Manifest {
+	if a.st == nil {
+		return nil
+	}
+	rows, err := a.st.Pool().Query(ctx, `
+		SELECT manifest_json FROM kernel_plugins WHERE status <> 'uninstalled'`)
+	if err != nil {
+		return nil
+	}
+	defer rows.Close()
+	var out []plugin.Manifest
+	for rows.Next() {
+		var raw []byte
+		if err := rows.Scan(&raw); err != nil {
+			continue
+		}
+		var mf plugin.Manifest
+		if err := json.Unmarshal(raw, &mf); err != nil {
+			continue
+		}
+		out = append(out, mf)
+	}
+	return out
+}
+
+func (a *API) handlePluginLifecycle(w http.ResponseWriter, r *http.Request) {
+	if a.pm == nil {
+		writeErr(w, http.StatusNotImplemented, "plugin manager 未就绪")
+		return
+	}
+	pluginID := r.PathValue("plugin_id")
+	recs, err := a.pm.ListLifecycle(r.Context(), pluginID)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if recs == nil {
+		recs = []plugin.LifecycleRecord{}
+	}
+	writeJSON(w, http.StatusOK, recs)
+}
+
 func (a *API) handlePluginList(w http.ResponseWriter, r *http.Request) {
 	rows, err := a.st.Pool().Query(r.Context(), `
 		SELECT plugin_id, plugin_type, display_name, namespace, status, config_version, created_at, manifest_json
@@ -1262,14 +1309,15 @@ func (a *API) handlePluginList(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 
 	type pluginItem struct {
-		PluginID      string             `json:"plugin_id"`
-		PluginType    string             `json:"plugin_type"`
-		DisplayName   string             `json:"display_name"`
-		Namespace     string             `json:"namespace"`
-		Status        string             `json:"status"`
-		ConfigVersion *int64             `json:"config_version,omitempty"`
-		CreatedAt     time.Time          `json:"created_at"`
-		UI            *plugin.UIManifest `json:"ui,omitempty"`
+		PluginID       string             `json:"plugin_id"`
+		PluginType     string             `json:"plugin_type"`
+		PluginCategory string             `json:"plugin_category,omitempty"`
+		DisplayName    string             `json:"display_name"`
+		Namespace      string             `json:"namespace"`
+		Status         string             `json:"status"`
+		ConfigVersion  *int64             `json:"config_version,omitempty"`
+		CreatedAt      time.Time          `json:"created_at"`
+		UI             *plugin.UIManifest `json:"ui,omitempty"`
 	}
 	var out []pluginItem
 	for rows.Next() {
@@ -1281,9 +1329,11 @@ func (a *API) handlePluginList(w http.ResponseWriter, r *http.Request) {
 		}
 		if len(rawManifest) > 0 {
 			var mf struct {
-				UI *plugin.UIManifest `json:"ui"`
+				PluginCategory string             `json:"plugin_category"`
+				UI             *plugin.UIManifest `json:"ui"`
 			}
-			if err := json.Unmarshal(rawManifest, &mf); err == nil && mf.UI != nil {
+			if err := json.Unmarshal(rawManifest, &mf); err == nil {
+				it.PluginCategory = mf.PluginCategory
 				it.UI = mf.UI
 			}
 		}
@@ -1694,9 +1744,12 @@ func (a *API) handleBotGet(w http.ResponseWriter, r *http.Request) {
 	content, _ := a.memMgr.LoadInjectedContext(botID)
 	lines := memory.CountLines(content)
 
+	identity, identities := plugin.ClassifyBotIdentity(botID, role, a.installedManifests(r.Context()))
 	resp := map[string]any{
 		"bot_id":          botID,
 		"role":            role,
+		"identity":        identity,
+		"identities":      identities,
 		"display_name":    displayName,
 		"activation_mode": actMode,
 		"capabilities":    capabilities,
@@ -2281,5 +2334,3 @@ func (a *API) handleMarketplaceUninstall(w http.ResponseWriter, r *http.Request)
 		"audit_entry": fmt.Sprintf("audit_uninstall_%s_%d", req.PluginID, time.Now().Unix()),
 	})
 }
-
-

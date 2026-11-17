@@ -3,6 +3,7 @@
   "name": "Example Plugin",
   "version": "1.0.0",
   "plugin_type": "workspace",
+  "plugin_category": "foundation",
   "description": "NexusCore 示例插件模板",
   "binary": "/home/yhy/Projects/NexusCore/bin/plugins/plugin_example",
   "publishing": [

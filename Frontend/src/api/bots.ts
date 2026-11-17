@@ -4,11 +4,30 @@ import { apiClient } from './client'
 export interface BotInfo {
   bot_id: string
   role: string
+  identity?: string
+  identities?: string[]
   display_name: string
   activation_mode: string
   capabilities: string[]
   observed_state: string
   enabled: boolean
+}
+
+export function identityLabel(identity?: string): string {
+  switch (identity) {
+    case 'system':
+      return '系统'
+    case 'user':
+      return '用户'
+    case 'owner':
+      return '宿主'
+    case 'business':
+      return '业务'
+    case 'plugin':
+      return '插件'
+    default:
+      return ''
+  }
 }
 
 export interface BotListResponse {
@@ -18,6 +37,8 @@ export interface BotListResponse {
 export interface BotDetail {
   bot_id: string
   role: string
+  identity?: string
+  identities?: string[]
   display_name: string
   activation_mode: string
   capabilities: string[]
