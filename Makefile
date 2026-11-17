@@ -1,7 +1,15 @@
 BIN_DIR := bin
 PLUGIN_BIN_DIR := bin/plugins
 
-.PHONY: build build-plugins test test-pg vet fmt proto migrate-probe migrate-up migrate-down compose-up compose-down smoke-empty smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-m8 smoke-m9 launch-m4 drill-crash-m1 clean
+.PHONY: build build-frontend build-all build-plugins test test-pg vet fmt proto migrate-probe migrate-up migrate-down compose-up compose-down smoke-empty smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-m8 smoke-m9 smoke-m10 launch-m4 drill-crash-m1 clean
+
+build-frontend:
+	@echo "==> 构建前端生产产物..."
+	@cd Frontend && npm install && npm run build
+	@echo "==> 同步静态资源到 hub/web/dist..."
+	@mkdir -p hub/web/dist
+	@cp -r Frontend/dist/* hub/web/dist/
+	@echo "前端静态产物已就绪并同步至 hub/web/dist"
 
 build:
 	@mkdir -p $(BIN_DIR)
@@ -11,6 +19,9 @@ build:
 	@go build -o $(BIN_DIR)/cli ./cli
 	@go build -o $(BIN_DIR)/migrate ./cmd/migrate
 	@echo "build ok: $(BIN_DIR)/{hub,bot-runtime,agent-daemon,cli,migrate}"
+
+build-all: build-frontend build build-plugins
+	@echo "build-all ok: 前端嵌入完成，微内核与插件全量编译完毕"
 
 build-plugins:
 	@mkdir -p $(PLUGIN_BIN_DIR)

@@ -1,184 +1,164 @@
 # NexusCore
 
-以微内核为基础的个人智能工作台（Personal Intelligent Workspace based on Microkernel Architecture）。
+<div align="center">
 
-系统架构解耦为三大核心板块：**Kernel**（微内核底座与原生单体记忆）、**GroupChatPlugin**（独立多 Bot 群聊插件）、**Frontend**（Vue 3 前端工作台）。
+**下一代个人智能多 Agent 微内核工作台**  
+*Personal Intelligent Multi-Agent Workspace powered by Microkernel Architecture*
 
----
+[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+[![Go Version](https://img.shields.io/badge/Go-1.26+-00ADD8?logo=go)](https://golang.org)
+[![Vue 3](https://img.shields.io/badge/Frontend-Vue%203%20%2B%20Vite-4FC08D?logo=vue.js)](Frontend)
+[![PostgreSQL](https://img.shields.io/badge/Database-PostgreSQL%2016+-4169E1?logo=postgresql)](https://www.postgresql.org)
+[![Version](https://img.shields.io/badge/Release-v0.2.0-success)](#)
 
-## 核心设计理念
+[产品特性](#核心亮点) • [使用场景](#典型应用场景) • [极速上手](#快速开始) • [架构理念](#架构设计理念) • [开源协议](#许可证)
 
-1. **微内核三原语**：内核只负责 **PostgreSQL 持久化事件与任务队列**、**Bot 注册运行时与配置中心**、**跨设备传输路由**三类原语。业务语义（笔记渲染、看板拖拽、IM SDK、LLM 推理、上下文装配等）绝不侵入微内核源码。
-2. **脑手分离（Brain-Hand Separation）**：
-   - **Bot（简单 Agent）**：运行在内核或插件侧的长期认知决策体。**禁止长时间思考，禁止直接执行 Shell**，只能调用系统提供的受控功能与工具。
-   - **Agent（跨设备物理探针）**：无人格受控工具执行器，通过 Hub 传输路由（反向 TCP）接受调度，负责实际环境与物理操作。
-3. **Bot 原生单体记忆（对齐 Claude Code 四层栈）**：
-   - 深度对齐 Claude Code 文件系统记忆模型：**Transcripts**（原始会话追加审计）→ **Memory Notes**（离散笔记经验）→ **Memory Representations**（结构化主题 Wiki）→ **Injected Context**（常驻极小切片）。
-   - **铁律约束**：`MEMORY.md` 严格限制 **≤ 200 行**（约 500~2000 Tokens），配合 Prompt Caching 确保 85%~93% 缓存命中，彻底消除上下文二次方复合膨胀。
-   - **Auto Dream 离线整合**：异步四阶段（Orientation → Signal Gathering → Consolidation → Pruning & Indexing）削峰填谷。
-4. **独立群聊插件与严格防死循环**：
-   - 业务多 Bot 群聊作为独立插件（L2 独立进程）解耦开发。
-   - **严格限制“仅仅用户@触发”**：只有人类用户消息显式 `@<bot_id>` 时激活对应 Bot；Bot 回复中的 @ 仅作纯文本展示，**禁止 Bot 间自发级联互 @ 唤醒**，杜绝发散与 Token 爆炸。
-5. **重启策略（Restart Policy）**：
-   - Bot 的人格设定（System Prompt）、画像（Profile）与单体记忆修改通过 Supervisor 毫秒级优雅重启生效，无需复杂动态热更状态机负担。
+</div>
 
 ---
 
-## 模块架构与目录结构
+## 什么是 NexusCore？
 
-```
-NexusCore/
-├── hub/                         # 微内核网关（队列/事件、注册与 ACL、config、ingress、scheduler、outbox、transport、supervisor）
-├── memory/                      # Bot 原生单体记忆系统（Claude Code 四层栈 + MEMORY.md ≤200行 + Auto Dream）
-├── bot-runtime/                 # Bot 独立运行时（简单 Agent 实现：禁Shell、禁长思考、操控 Agent）
-├── agent-daemon/                # 跨设备受控物理探针（反向 TCP 接入、工具执行器）
-├── cli/                         # 用户(user_bot)投递与管理控制台
-├── cmd/migrate/                 # 内核 PostgreSQL 迁移 CLI
-├── internal/                    # 跨二进制内部公共库（osproc、envelope、version 等）
-├── migrations/                  # 内核 schema DDL 脚本
-├── proto/                       # gRPC 控制面契约
-├── GroupChatPlugin/             # 独立群聊插件工程（独立开发、L2 独立二进制）
-│   ├── main.go                  # 群聊插件主进程
-│   ├── manifest.json            # 插件标准清单（契约声明、SHA256 强校验）
-│   ├── room/                    # 房间与会话滑动窗口管理
-│   └── mention/                 # @ 语法提取器（仅用户@触发路由）
-├── Frontend/                    # 独立前端工程（Vue 3 + Vite + Pinia + Element Plus）
-│   ├── src/views/               # 群聊视区、Bot 画像/记忆抽屉、Agent 实时监控面板
-│   ├── src/components/          # 气泡消息、@Mention 输入补全、Agent 执行卡片
-│   ├── src/stores/              # 响应式状态管理（Bot 列表、房间消息、SSE 流）
-│   └── vite.config.ts           # 前端工程构建与代理配置
-├── doc/                         # 架构与实现设计文档全集
-└── scripts/                     # 自动化验收、冒烟与全栈启动脚本集
-```
+**NexusCore** 是一款专为开发者与深度 AI 用户打造的**个人多智能体（Multi-Agent）微内核工作台**。
+
+传统 AI 助手往往面临三大困局：**“金鱼记忆”带来的高额重复上下文开销**、**多 Agent 协同中的无序死循环与 Token 爆炸**，以及**让大模型直接裸奔执行宿主命令的安全失控**。
+
+NexusCore 通过**微内核架构（Microkernel）**与**脑手分离机制（Brain-Hand Separation）**，将 AI 的**认知决策**与**物理执行**彻底解耦：
+- **认知层（Bot）**：专注领域思考、协同决策与长效知识沉淀，不直接接触宿主底层。
+- **执行层（Agent Probe）**：跨设备的受控物理探针，通过加密反向通道接受调度，工具操作透明留痕。
+- **微内核（Hub）**：提供高可靠持久消息总线、两级进程生命周期管理与安全审批中台。
+
+无论是全栈研发协作、知识资产积累还是本地跨设备自动化，NexusCore 都能为你构建一个稳定、持久、自主掌控的智能专属团队。
 
 ---
 
-## 关键功能特性
+## 核心亮点
 
-### 1. 微内核队列与总线
-- **PG 原生持久队列**：基于 PostgreSQL `FOR UPDATE SKIP LOCKED` 高并发抢占消费，租约锁定 60s，心跳 10s 自动续租。
-- **D-04 四语义支持**：全链路因果链（`correlation_id / causation_id / causal_path`）、幂等键去重、`suspended` 挂起与人工确认幂等恢复、Transactional Outbox 事务外发。
-- **两级进程管理**：Supervisor 负责管理 Bot 进程（L1）与插件宿主进程（L2），支持 PID + `pid_start_time` 防复用、孤儿级联回收与优雅停机。
+### 💬 1. 秩序井然的多 Bot 协同群聊
+- **人类主导的精准调度**：严格遵循“**仅用户显式 @ 唤醒**”机制，Bot 回复中的 @ 自动转化为展示标签，从根源上杜绝 Bot 之间互相无休止串联对话造成的死循环与 Token 消耗。
+- **团队化分工协作**：自由创建架构师、研发专家、审查员等不同专属角色，在一个窗口内自如呼叫与切换。
 
-### 2. 配置中心（Config Center）
-- 统一管理 `plugin / bot / agent / global` 四类期望配置。
-- **全链路审批机制**：`Propose → Security Review (预审) → User Approve (user_bot 交互终端审批) → Activate`，内置 checksum 防篡改与一键 Rollback。
-- 敏感配置严格采用 `secret_ref` 凭据隔离，绝不明文存储密钥。
+### 🧠 2. 深度对齐长效单体记忆栈
+- **四层记忆体系**：对齐现代文件系统级单体记忆设计：
+  $$\text{Transcripts (原始会话事实)} \longrightarrow \text{Memory Notes (离散经验)} \longrightarrow \text{Representations (结构化认知)} \longrightarrow \text{Injected Context (常驻切片)}$$
+- **200 行铁律（零膨胀）**：核心记忆文件 `MEMORY.md` 严格限定在 200 行以内，保证 **85%~93%** 的极高 Prompt Cache 命中率，彻底消灭二次方级 Token 膨胀。
+- **Auto Dream 离线整合**：在系统空闲期自动进行记忆提取、去重、归纳与剪枝，实现认知沉淀的削峰填谷。
+- **一键重载生效**：Bot 画像、人格指令与核心记忆随改随用，通过 Supervisor 毫秒级优雅重启立即生效。
 
-### 3. 原生单体记忆（Claude Code 栈）
-- 每个 Bot 自带独立记忆根目录：`data/bots/<bot_id>/memory/`。
-- **会话追加**：`transcripts/*.jsonl` 纯物理追加，记录每轮交互事实。
-- **记忆提取与重构**：`MEMORY.md` 严格维持在 200 行以内，由 Auto Dream 离线周期提炼；超过 200 行更新直接在 API 层面 400 拦截。
+### 🦾 3. 脑手分离与安全探针
+- **受控跨设备物理执行**：Bot 严禁直接在主机运行未经审核的 Shell 命令，所有环境操作与代码运行统一经微内核路由至远端或本机的受控物理探针（Agent Daemon）执行。
+- **全链路操作轨迹审计**：内置沙盒工具执行审计，命令输入、执行毫秒耗时、终端输出全部留痕，一览无余。
 
-### 4. 独立群聊插件（GroupChatPlugin）
-- 声明式 `manifest.json`，静态绑定事件订阅与发布能力。
-- 房间消息时序维护与滑动上下文窗口注入。
-- 严格的用户唤醒防线：只有真实用户发出的消息中包含 `@<bot_id>` 时，插件才封装并分发调度任务；Bot 生成文本里的 `@` 自动转换为展示标签，绝不回投总线触发连环死锁。
+### 🛡️ 4. 严谨的安全审批与代批中台
+- **高危操作阶梯式审批**：敏感系统配置与高风险工具调用遵循 `提议 (Propose) → 安全预审 (Security Review) → 人工批准 (User Approve)` 严谨链路。
+- **中台 Bot 受控代批（RBAC）**：支持授权合规的中台 Bot 代行日常安全操作，严禁越权越级，平衡效率与极致安全。
 
-### 5. 现代化 Web 工作台（Frontend）
-- **实时通信网关**：基于 Hub HTTP/SSE 网关（`:7200`），实时中继推送 Bot 状态（空闲 / 思考 / 调度 Agent）、群聊消息流与 Agent 实时终端流帧。
-- **多 Bot 群聊会话**：多 Bot 同台在线，支持 Markdown 渲染、代码高亮、输入框 `@` 自动提示补全。
-- **Bot 画像与记忆抽屉**：可视化编辑 Bot 的 System Prompt、Persona、Profile 及 `MEMORY.md`，支持“保存并一键重启”立即生效。
-- **Agent 执行可视化监视**：实时展示反向 TCP 传输帧、工具调用详情、终端输出与执行毫秒耗时。
+### 🧩 5. 现代化微前端与插件生态
+- **双段式工作台（纪事与工坊）**：左侧聚合历史上下文与知识纪事，右侧居中极简输入框，兼顾专注与全景浏览。
+- **插件即应用**：基于微前端（Vite ESM 动态挂载）与两级进程模型，群聊、Bot 工厂、工具中心等核心功能均为可插拔组件，生态扩展随心所欲。
+- **丰富工具生态集成**：原生兼容系统内置工具、自定义可编辑 Skill 以及外部标准化 MCP（Model Context Protocol）协议。
+
+---
+
+## 典型应用场景
+
+| 场景 | 赋能方式 | 体验提升 |
+| :--- | :--- | :--- |
+| **全栈敏捷开发团队** | 创建专门的 `Architect`、`Coder` 与 `Reviewer` Bot，在群聊中按步骤 @ 召唤，联动本地代码探针执行编译、测试与重构。 | 多智能体各司其职，无相互干扰与上下文污染。 |
+| **个人知识与项目管家** | 借助 Bot 单体长效记忆与 Auto Dream，持续记录个人偏好、业务上下文与技术沉淀。 | 对话越久越默契，打破每次对话都要重新交代背景的痛点。 |
+| **跨设备自动化运维** | 将受控探针部署在多台服务器、边缘设备或开发机上，统一在 Web 端通过中枢 Bot 调度与监管。 | 反向连接穿透内网，命令执行可视透明，免去繁琐 SSH 切换。 |
+| **AI 工具与 Skill 实验场** | 统一挂载多种 MCP 服务、本地 CLI 工具和定制脚本，通过权限矩阵动态授权给指定的 Bot。 | 即插即用，安全隔离，轻松测试前沿 Agent 工具生态。 |
 
 ---
 
 ## 快速开始
 
-### 运行环境要求
+### 环境依赖
 - **Go**: 1.26+
-- **Node.js**: 18+ (推荐 Node 20 / 22)
-- **PostgreSQL**: 16+（自带 `docker-compose.yml` 或本地实例）
+- **Node.js**: 18+ (推荐 20 或 22)
+- **PostgreSQL**: 16+（内置 Docker Compose 配置）
 
-### 1. 编译构建
+### 1. 克隆代码与编译
 ```bash
-# 编译微内核核心二进制（bin/hub、bin/bot-runtime、bin/agent-daemon、bin/cli、bin/migrate）
+git clone https://github.com/888xiyan/NexusCore.git
+cd NexusCore
+
+# 编译微内核组件（hub, bot-runtime, agent-daemon, cli, migrate）
 make build
 
-# 编译独立插件（bin/plugins/plugin_groupchat、bin/plugins/plugin_memory）
+# 编译独立业务插件
 make build-plugins
 ```
 
-### 2. 准备数据库
+### 2. 初始化数据库
 ```bash
-# 使用 Docker Compose 快速启动本地 PostgreSQL 16+ 实例（默认端口 55432）
+# 启动本地 PostgreSQL 容器（默认端口 55432）
 make compose-up
 
-# 执行内核 Schema 迁移脚本
+# 执行数据库初始化迁移
 export NEXUS_PG_KERNEL_DSN="postgres://nexus_kernel:nexus_dev_kernel@127.0.0.1:55432/nexus"
 make migrate-up
 ```
 
-### 3. 一键启动全栈开发环境（推荐）
+### 3. 一键启动全栈工作台
 ```bash
-# 一键自动检查依赖、清理旧进程，并同时拉起 Hub(7200) + Agent-Daemon + GroupChatPlugin + Frontend(5173)
+# 自动拉起 Hub (网关:7200) + 物理探针 + 群聊插件 + Web 前端 (:5173)
 make launch-m4
 ```
-启动成功后，浏览器访问：**`http://localhost:5173`** 即可进入 NexusCore 智能工作台。
+
+启动完成后，打开浏览器访问：
+👉 **`http://localhost:5173`** 即可开启你的 NexusCore 智能工作台之旅。
 
 ---
 
-## 常用命令一览
+## 架构设计理念
 
-| 命令 | 描述 |
-| --- | --- |
-| `make build` | 编译 5 个核心二进制到 `bin/` |
-| `make build-plugins` | 编译独立插件到 `bin/plugins/` |
-| `make test` | 运行单元测试（跳过真库测试） |
-| `make test-pg` | 运行全量单元测试与 PostgreSQL 真库集成测试 |
-| `make vet` | 执行静态代码检查 |
-| `make proto` | 基于 buf 与 protoc 重新生成 gRPC 代码 |
-| `make compose-up` | 启动 PostgreSQL 16+ Docker 容器 |
-| `make compose-down` | 停止 PostgreSQL 16+ Docker 容器 |
-| `make migrate-up` | 执行内核数据库向上迁移 |
-| `make migrate-down` | 回滚内核数据库迁移 |
-| `make smoke-m1` | 运行 M1 纯内核九步冒烟与边界验收 |
-| `make smoke-m2` | 运行 M2 Bot 管理、配置审批全链路与进程生命周期冒烟 |
-| `make smoke-m3` | 运行 M3 单体记忆、简单 Agent 操控与群聊插件闭环冒烟 |
-| `make smoke-m4` | 运行 M4 11 步端到端全链路冒烟验收（前端+网关+群聊+记忆抽屉+监控） |
-| `make launch-m4` | 开发者全栈一键启动（Hub + Agent + GroupChat + Frontend） |
-| `make drill-crash-m1` | 运行 M1 崩溃恢复演练（注入 SIGKILL 测试恢复能力） |
-| `make clean` | 清理编译产物 `bin/` |
+```
+ ┌─────────────────────────────────────────────────────────────┐
+ │               Frontend (Vue 3 + Vite 微前端)                 │
+ │     [纪事与工坊视区]   [@Mention 沉浸输入]   [沙盒轨迹审计]    │
+ └──────────────────────────────┬──────────────────────────────┘
+                                │ HTTP / SSE 流式中继 (:7200)
+ ┌──────────────────────────────▼──────────────────────────────┐
+ │                      Hub 微内核底座                          │
+ │  ┌───────────────────────┐   ┌───────────────────────────┐  │
+ │  │ PG 原生持久事件与队列  │   │ Bot 运行时 (Supervisor)   │  │
+ │  └───────────────────────┘   └───────────────────────────┘  │
+ │  ┌───────────────────────┐   ┌───────────────────────────┐  │
+ │  │ 安全配置中心与审批流  │   │ 跨设备反向 TCP 传输路由   │  │
+ │  └───────────────────────┘   └───────────────────────────┘  │
+ └──────────────┬───────────────────────────────┬──────────────┘
+                │ 控制面与总线调度              │ 反向 TCP 探针通信
+ ┌──────────────▼─────────────┐   ┌─────────────▼──────────────┐
+ │     Bot 认知决策层         │   │      Agent 物理执行层       │
+ │   - 单体记忆 (Claude Code) │   │   - 受控 Shell / CLI       │
+ │   - MEMORY.md ≤ 200 行     │   │   - 跨设备物理操作探针     │
+ │   - Auto Dream 离线整合    │   │   - 工具执行轨迹与沙盒     │
+ └────────────────────────────┘   └────────────────────────────┘
+```
 
----
-
-## 里程碑与当前状态
-
-| 里程碑 | 内容概述 | 状态 | 验收凭证 |
-| --- | --- | --- | --- |
-| **M0 工程准备** | 仓库骨架、PostgreSQL 迁移 CLI（pgx）、proto 契约、Makefile、配置中心表结构 | **已完成** | `c657459`（D-22 / D-23 落地） |
-| **M1 内核 MVP** | hub 10 模块、PostgreSQL 持久队列、D-04 四语义、失败注入、崩溃恢复 | **已完成** | `3a0e2a6`、详设 §8 六条验收全过 |
-| **M2 Bot管理与插件运营** | 配置中心审批流、两级进程生命周期（防PID复用）、插件安装审计、DLQ运营 | **已完成** | `d569a80`、`make smoke-m2` 全绿 |
-| **M3 群聊底座与单体记忆** | Claude Code 四层单体记忆（MEMORY.md ≤200行）、Auto Dream、GroupChatPlugin（仅用户@触发、防死循环） | **已完成** | `e2d72ee`、`make smoke-m3` 全绿 |
-| **M4 Vue 工作台与实机演示** | `Frontend/` Vue 3 独立工程、微内核网关 SSE、多 Bot 群聊交互、单体记忆抽屉（Save & Restart）、Agent 实时监控 | **已完成** | `0f236c7`、`make smoke-m4` 全链路 11 步全过 |
-| **M5 Agent Mesh 实真** | 跨设备 Agent 探针（反向 TCP、心跳 15s、工具清单上报）、Bash 工具白名单、HITL 人机协同审批确认 | **规划中（当前主线）** | 详见 `doc/开发规划.md` |
-| **M6 生态与输入通道** | Telegram / 飞书连接器插件、外部 Webhook 接入、多端消息中继 | **规划中** | 计划中 |
+NexusCore 严守以下核心工程规范：
+1. **微内核最小原语化**：内核仅保留持久队列、Bot 运行时与跨设备传输路由，业务语义百分之百下沉至插件层。
+2. **纯粹信封通讯**：总线消息信封仅承载身份与因果链，杜绝业务耦合。
+3. **两级进程隔离**：Bot 进程与插件宿主进程生命周期严格隔离，具备防 PID 复用与安全级联回收机制。
 
 ---
 
-## 设计文档索引
+## 常用操作与调试命令
 
-在进行任何功能调整与二次开发前，请务必阅读对应模块的设计文档：
-
-| 文档 | 说明 |
-| --- | --- |
-| [doc/NexusCore架构设计总结.md](doc/NexusCore架构设计总结.md) | 上游总设计：微内核三原语、脑手分离、数据模型与修订记录 |
-| [doc/内核mvp/内核MVP详细设计.md](doc/内核mvp/内核MVP详细设计.md) | 微内核实现级设计（hub 10 模块、kernel schema、PG 队列、配置中心底座） |
-| [doc/ConfigCenter/ConfigCenter详细设计.md](doc/ConfigCenter/ConfigCenter详细设计.md) | 配置中心架构（四域配置、完整审批流、交互终端安全约束） |
-| [doc/BotMvp/BotMvp详细设计.md](doc/BotMvp/BotMvp详细设计.md) | Bot 角色体系、生命周期、Supervisor 进程监督与优雅重启机制 |
-| [doc/MemoryPlugin/用户级Bot默认个人记忆架构.md](doc/MemoryPlugin/用户级Bot默认个人记忆架构.md) | Bot 原生单体记忆架构（Claude Code 四层栈、Auto Dream 机制） |
-| [doc/PluginMvp/PluginMvp详细设计.md](doc/PluginMvp/PluginMvp详细设计.md) | 插件模型规范、Manifest Schema、两级进程模型与优雅退出 |
-| [doc/开发规划.md](doc/开发规划.md) | 完整开发规划（M0-M7 里程碑、估计、停线点与验收标准） |
-| [doc/NexusCore已修正问题归档.md](doc/NexusCore已修正问题归档.md) | 已解决重大设计问题归档（D-01 至 D-10、D-13 至 D-23） |
-| [doc/NexusCore待修正问题清单.md](doc/NexusCore待修正问题清单.md) | 未解决问题追踪（D-11 / D-12） |
+| 常用命令 | 作用说明 |
+| :--- | :--- |
+| `make launch-m4` | 开发者一键启动全套服务栈（微内核 + 探针 + 插件 + 前端） |
+| `make build` | 编译微内核全部核心二进制到 `bin/` |
+| `make build-plugins` | 编译独立业务插件到 `bin/plugins/` |
+| `make test` | 快速运行单元测试 |
+| `make test-pg` | 运行真实 PostgreSQL 集成测试 |
+| `make smoke-m9` | 运行 M9 全局 UI 原型、标准群聊与沙盒工具轨迹全链路冒烟验收 |
+| `make smoke-m10` | 运行 M10 工具中心、MCP/Skill 插件化治理与中台审批闭环验收 |
+| `make clean` | 清除编译输出产物 |
 
 ---
 
-## 架构硬约束（铁律）
+## 许可证
 
-1. **总线权限隔离**：只有 bot 能够投递和消费消息；人类用户以 `user_bot` 席位入总线；插件经注册 bot 的单次投递委托交互。
-2. **纯粹信封通讯**：信封仅包含身份（`from_bot_id` 等）与因果链（`correlation_id / causation_id / causal_path`），严禁包含业务维度。
-3. **内核三原语收敛**：业务语义（图谱算法、笔记渲染、IM 协议等）绝不进入内核源码；MCP / Skill 不进入内核与配置中心。
-4. **单体记忆 200 行上限**：`MEMORY.md` 严格限定在 200 行以内，杜绝上下文二次方膨胀，保持极高缓存命中率。
-5. **群聊严格用户 @ 触发**：仅人类用户 @ 能够唤醒 Bot；Bot 回复中的 @ 仅为展示，绝不允许 Bot 间自发互 @ 唤醒，坚决阻断递归死循环。
-6. **两级进程安全**：插件进程（L2）由 owner bot 负责拉起与自治回收；强制终止前严格执行 PID + `pid_start_time` 双校验，杜绝误杀系统进程。
+本项目基于 [MIT 许可证](LICENSE) 开源。欢迎自由使用、修改与分发。

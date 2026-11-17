@@ -1,0 +1,11 @@
+.git
+.github
+bin/
+logs/
+data/
+*.log
+Frontend/node_modules/
+Frontend/dist/
+hub/web/dist/assets/
+deploy/local/
+doc/evidence/
