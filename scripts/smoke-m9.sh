@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M9 冒烟验收：全局 UI 原型、标准群聊插件与沙盒工具轨迹审计闭环
-# 依据：开发规划 §3 M9、doc/M9-标准群聊插件与全局UI注册详细设计.md、doc/系统Update-全局UI原型与沙盒工具轨迹审计详细设计.md。
+# 依据：开发规划 §3 M9、doc/milestones/M9-标准群聊与全局UI.md、doc/milestones/系统Update-全局UI与沙盒轨迹.md。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

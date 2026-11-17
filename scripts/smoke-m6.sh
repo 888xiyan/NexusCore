@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M6 冒烟验收：Bot 工厂与 Agent 绑定插件（plugin_bot_creator）、
 # 全局单 API Key 统筹、单体记忆 ≤ 200 行约束、Agent 资产绑定与 Supervisor 重启策略验收。
-# 依据：开发规划 §3 M6、doc/M6-Bot工厂与Agent绑定插件详细设计.md。
+# 依据：开发规划 §3 M6、doc/milestones/M6-Bot工厂.md。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

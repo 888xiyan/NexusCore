@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M8 冒烟验收：基础模块无头化沉淀、接口契约入配置中心、DAG 拓扑加载与依赖治理
-# 依据：开发规划 §3 M8、doc/M8-基础模块沉淀与接口设计.md、doc/M8-Update-插件接口注册与依赖治理方案.md。
+# 依据：开发规划 §3 M8、doc/milestones/M8-基础模块与依赖治理.md。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

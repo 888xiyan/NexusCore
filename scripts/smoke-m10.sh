@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M10 冒烟验收：工具中心、MCP/Skill 插件化治理与中台 Bot 审批闭环
-# 依据：开发规划 §3 M10、doc/M10-工具中心与中台Bot代批审批详细设计.md
+# 依据：开发规划 §3 M10、doc/milestones/M10-工具中心与代批.md
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

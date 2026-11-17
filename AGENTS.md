@@ -96,14 +96,15 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 | [doc/MemoryPlugin/MemoryPlugin详细设计.md](doc/MemoryPlugin/MemoryPlugin详细设计.md) | 记忆插件：双 schema / 四象限 / 晋升 / 工具 API / 事件回投（M3/M4） |
 | [doc/MemoryPlugin/用户级Bot默认个人记忆架构.md](doc/MemoryPlugin/用户级Bot默认个人记忆架构.md) | user_xxx_bot 默认个人记忆四层栈 / Auto Dream / 注入约束 |
 | [doc/PluginMvp/PluginMvp详细设计.md](doc/PluginMvp/PluginMvp详细设计.md) | 四类插件 / manifest schema / 命名规范 / 生命周期 / 卸载 / **两级进程模型与插件进程关闭链路（§6）** |
-| [doc/M4开发总结.md](doc/M4开发总结.md) | M4 前端 Vue 3 工作台、网关 SSE、群聊视区与 Agent 监控实机演示 |
-| [doc/M5-本地Agent搜寻与调度闭环详细设计.md](doc/M5-本地Agent搜寻与调度闭环详细设计.md) | 本地 Agent 资产探测（Claude Code/Codex/Pi-Agent 等）、探针 LocalCLIDriver、Bot 结构化调度与防噪音蒸馏闭环 |
-| [doc/M6-Bot工厂与Agent绑定插件详细设计.md](doc/M6-Bot工厂与Agent绑定插件详细设计.md) | Bot 创建向导、角色模板库、200行单体记忆约束校验与本地 Agent 绑定装配 |
-| [doc/M7-前端微模块化与插件注册表详细设计.md](doc/M7-前端微模块化与插件注册表详细设计.md) | Vite ESM 动态挂载、纯净 Shell、PluginRegistry 与微模块代码分割 |
-| [doc/M8-基础模块沉淀与接口设计.md](doc/M8-基础模块沉淀与接口设计.md) | 基础模块下沉无头化、契约接口设计、DAG 拓扑加载与依赖生命周期治理 |
-| [doc/M9-标准群聊插件与全局UI注册详细设计.md](doc/M9-标准群聊插件与全局UI注册详细设计.md) | v0.1.0 核心：群聊标准插件自治 UI、注册进全局 UI、聚合五大零散功能与独立 Schema 时序存储 |
-| [doc/系统Update-全局UI原型与沙盒工具轨迹审计详细设计.md](doc/系统Update-全局UI原型与沙盒工具轨迹审计详细设计.md) | 全局 UI 页面原型规范（左右两段式分栏 + @xxx 输入框）、内置沙盒记录工具轨迹、三层 Bot 与安全审批流 |
-| [doc/M10-工具中心与中台Bot代批审批详细设计.md](doc/M10-工具中心与中台Bot代批审批详细设计.md) | v0.2.0 生态：独立工具插件（系统工具/可编辑Skill/外部MCP）、`bot_tool_grants` 授权矩阵、中台 Bot 受控代批 RBAC |
+| [doc/milestones/README.md](doc/milestones/README.md) | M4–M10 里程碑详设索引 |
+| [doc/milestones/M4-前端工作台.md](doc/milestones/M4-前端工作台.md) | M4 前端 Vue 3 工作台、网关 SSE、群聊视区与 Agent 监控实机演示 |
+| [doc/milestones/M5-本地Agent搜寻.md](doc/milestones/M5-本地Agent搜寻.md) | 本地 Agent 资产探测（Claude Code/Codex/Pi-Agent 等）、探针 LocalCLIDriver、Bot 结构化调度与防噪音蒸馏闭环 |
+| [doc/milestones/M6-Bot工厂.md](doc/milestones/M6-Bot工厂.md) | Bot 创建向导、角色模板库、200行单体记忆约束校验与本地 Agent 绑定装配 |
+| [doc/milestones/M7-前端微模块.md](doc/milestones/M7-前端微模块.md) | Vite ESM 动态挂载、纯净 Shell、PluginRegistry 与微模块代码分割 |
+| [doc/milestones/M8-基础模块与依赖治理.md](doc/milestones/M8-基础模块与依赖治理.md) | 基础模块下沉无头化、契约接口、DAG 拓扑加载与依赖生命周期治理 |
+| [doc/milestones/M9-标准群聊与全局UI.md](doc/milestones/M9-标准群聊与全局UI.md) | v0.1.0 核心：群聊标准插件自治 UI、注册进全局 UI、独立 Schema 时序存储 |
+| [doc/milestones/系统Update-全局UI与沙盒轨迹.md](doc/milestones/系统Update-全局UI与沙盒轨迹.md) | 全局 UI 页面原型（左右两段式分栏 + @xxx 输入框）、内置沙盒记录工具轨迹、三层 Bot 与安全审批流 |
+| [doc/milestones/M10-工具中心与代批.md](doc/milestones/M10-工具中心与代批.md) | v0.2.0 生态：独立工具插件（系统工具/可编辑Skill/外部MCP）、`bot_tool_grants` 授权矩阵、中台 Bot 受控代批 RBAC |
 | [doc/开发规划.md](doc/开发规划.md) | M0-M10 里程碑 / 估计 / 停线点 |
 | [doc/NexusCore待修正问题清单.md](doc/NexusCore待修正问题清单.md) | D-11 / D-12（未解决问题，均属插件内部或业务契约） |
 | [doc/NexusCore已修正问题归档.md](doc/NexusCore已修正问题归档.md) | D-01 至 D-10 / D-13 至 D-23（已解决） |
@@ -172,8 +173,8 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 | M2 Bot 管理与插件运营 | 已完成 | PostgreSQL 16+ docker-compose、配置中心完整审批流、Bot 管理、两级进程生命周期、DLQ 与 Health 全部验收通过（`d569a80`） |
 | M3 群聊底座与单体记忆 | 已完成 | 内置 Claude Code 式四层单体记忆栈（MEMORY.md ≤200行约束 + Auto Dream 离线整合）；独立开发 `GroupChatPlugin`（仅用户@唤醒、防死循环）；简单 Agent 操控 Agent 闭环全链路验收通过 |
 | M4 Vue 工作台与实机演示 | 已完成 | `Frontend/` Vue 3 前端工程独立搭建（Vite + Pinia + Element Plus）；Hub HTTP/SSE 网关打通；多 Bot 群聊（严格用户@触发）、Bot 画像与单体记忆抽屉（MEMORY.md ≤200行约束与一键重启）、Agent 实时调度执行监控；端到端自动化验收 `scripts/smoke-m4.sh` 与 `scripts/launch-dev.sh` 全链路通过 |
-| M5 本地 Agent 搜寻与调度闭环 | 已完成 | 详设文档定版落地（`doc/M5-本地Agent搜寻与调度闭环详细设计.md`），LocalCLIDriver 本地 CLI 驱动、本地 Agent 搜寻插件 `plugin_agent_discovery` 与 Bot 结构化调度与防噪音蒸馏闭环全部完成（`scripts/smoke-m5.sh`） |
-| M6 Bot 工厂与 Agent 绑定插件 | 已完成 | 详设定版（`doc/M6-Bot工厂与Agent绑定插件详细设计.md`），独立插件 `plugin_bot_creator`、预设角色模板库（Reviewer/Coder/Ops）、蓝图与保留名/200行记忆校验、Agent 绑定参数装配、前端创建向导（Vue 3）与端到端自动化冒烟（`make smoke-m6`）全链路通过 |
+| M5 本地 Agent 搜寻与调度闭环 | 已完成 | 详设文档定版落地（`doc/milestones/M5-本地Agent搜寻.md`），LocalCLIDriver 本地 CLI 驱动、本地 Agent 搜寻插件 `plugin_agent_discovery` 与 Bot 结构化调度与防噪音蒸馏闭环全部完成（`scripts/smoke-m5.sh`） |
+| M6 Bot 工厂与 Agent 绑定插件 | 已完成 | 详设定版（`doc/milestones/M6-Bot工厂.md`），独立插件 `plugin_bot_creator`、预设角色模板库（Reviewer/Coder/Ops）、蓝图与保留名/200行记忆校验、Agent 绑定参数装配、前端创建向导（Vue 3）与端到端自动化冒烟（`make smoke-m6`）全链路通过 |
 | M7 前端微模块化与插件注册表 | 已完成 | 方案 A（Vite ESM 动态导入）：宿主纯净 Shell 骨架（100% 剥离业务硬编码）+ 插件注册表（PluginRegistry）、UI 契约与运行时共享规范（`window.__NEXUS_CORE__`）、微模块独立代码分割（GroupChat / Agent Discovery / Bot Creator）与端到端自动化冒烟（`make smoke-m7`）全链路通过 |
 | M8 基础模块沉淀与依赖治理 | 已完成 | 核心能力下沉无头化（100% 剥离 UI，涵盖 GroupChat、AgentMesh、BotFactory），单测覆盖率全量 ≥ 85%；能力契约入配置中心（SemVer），业务插件清单声明依赖；内核 DAG 拓扑排序加载（Kahn 算法）；环路静态检测（三色标记 DFS）+ 依赖深度硬限制（Max Depth ≤ 2）+ 逆序安全级联卸载 + 两阶段平滑滚动热更新；端到端自动化验收 `make smoke-m8` 10 步全链路通过 |
 | M9 全局UI原型、标准群聊与沙盒轨迹 | 已完成（v0.1.0 旗舰） | 落地手绘原型左右两段导航（纪事/工坊）+ 右侧居中 @ 输入框；标准群聊微前端自治；**内置沙盒记录 Bots 使用工具轨迹**；独立 Schema 存储与原生 UI 主题；`make smoke-m9` 10 步全链路通过 |

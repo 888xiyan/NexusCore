@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # M5 冒烟验收：本地 Coding Agent 搜寻插件、LocalCLIDriver 物理受控执行、
 # Bot 结构化调度外部 Agent CLI 与防噪音蒸馏闭环验收。
-# 依据：开发规划 §3 M5、doc/M5-本地Agent搜寻与调度闭环详细设计.md。
+# 依据：开发规划 §3 M5、doc/milestones/M5-本地Agent搜寻.md。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"

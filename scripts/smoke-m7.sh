@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # M7 冒烟验收：前端微模块化与插件注册表（方案 A：Vite ESM 动态加载 / 宿主纯净 Shell）
-# 依据：开发规划 §3 M7、doc/M9-标准群聊插件与全局UI注册详细设计.md。
+# 依据：开发规划 §3 M7、doc/milestones/M7-前端微模块.md。
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
