@@ -189,6 +189,7 @@ go run ./cmd/migrate -cmd up -dsn "$NEXUS_PG_MIGRATE_DSN" -dir migrations/kernel
 # 同步二进制摘要
 BOT_RUNTIME_DIGEST=$(sha256sum "$ROOT/bin/bot-runtime" | awk '{print $1}')
 psql_exec "UPDATE kernel.bot_manifest SET binary_path='$ROOT/bin/bot-runtime', binary_digest='$BOT_RUNTIME_DIGEST', manifest_digest='$BOT_RUNTIME_DIGEST', updated_at=now() WHERE bot_id IN ('echo_bot','user_bot','create_bot','monitor_bot','security_bot');"
+psql_exec "UPDATE kernel.bot_manifest SET binary_path='$ROOT/bin/bot-runtime', binary_digest='$BOT_RUNTIME_DIGEST', manifest_digest='$BOT_RUNTIME_DIGEST', updated_at=now() WHERE bot_id='groupchat_bot';"
 
 GROUPCHAT_DIGEST=$(sha256sum "$ROOT/bin/plugins/plugin_groupchat" | awk '{print $1}')
 python3 -c "
@@ -207,7 +208,7 @@ INSERT INTO kernel.bot_manifest (bot_id, role, managed_by, display_name, capabil
 VALUES 
   ('ops_bot', 'plugin', 'user_bot', 'Ops Bot', '[\"ops\", \"agent_control\"]'::jsonb, '$ROOT/bin/bot-runtime', '$BOT_RUNTIME_DIGEST', '$BOT_RUNTIME_DIGEST', 'lazy', 'claude-3-5-sonnet', 'prompts/ops_bot.txt'),
   ('qa_bot', 'plugin', 'user_bot', 'QA Bot', '[\"qa\", \"test_runner\"]'::jsonb, '$ROOT/bin/bot-runtime', '$BOT_RUNTIME_DIGEST', '$BOT_RUNTIME_DIGEST', 'lazy', 'claude-3-5-sonnet', 'prompts/qa_bot.txt')
-ON CONFLICT (bot_id) DO UPDATE SET binary_path=EXCLUDED.binary_path, binary_digest=EXCLUDED.binary_digest;
+ON CONFLICT (bot_id) DO UPDATE SET binary_path=EXCLUDED.binary_path, binary_digest=EXCLUDED.binary_digest, manifest_digest=EXCLUDED.manifest_digest;
 
 INSERT INTO kernel.bots (bot_id, desired_state, desired_by, observed_state, enabled)
 VALUES 
@@ -299,6 +300,12 @@ fi
 # 步骤 4：安装并激活 GroupChatPlugin 独立插件 (:7300)
 # ==============================================================================
 log_info "4. 启动 GroupChatPlugin 独立插件 (:7300)..."
+GROUPCHAT_INSTALLED_BIN=$(psql_exec "SELECT COALESCE(manifest_json->>'binary','') FROM kernel.kernel_plugins WHERE plugin_id='plugin_groupchat' AND status IN ('enabled','installed','disabled');")
+GROUPCHAT_INSTALLED_DIGEST=$(psql_exec "SELECT COALESCE(manifest_json->>'binary_digest','') FROM kernel.kernel_plugins WHERE plugin_id='plugin_groupchat' AND status IN ('enabled','installed','disabled');")
+if [[ -n "$GROUPCHAT_INSTALLED_BIN" && ( "$GROUPCHAT_INSTALLED_BIN" != "$ROOT/bin/plugins/plugin_groupchat" || "$GROUPCHAT_INSTALLED_DIGEST" != "$GROUPCHAT_DIGEST" ) ]]; then
+  log_info "GroupChatPlugin 制品与当前 checkout 不一致，执行开发态重装..."
+  ./bin/cli plugin uninstall plugin_groupchat --confirm -hub-http "http://$HTTP_HOST:$HUB_HTTP_PORT" -credential-file "$DEV_DIR/user_bot.cred" >/dev/null 2>&1 || log_warn "GroupChatPlugin 旧制品清理失败，继续尝试安装"
+fi
 INSTALL_RESP=$(./bin/cli plugin install GroupChatPlugin/manifest.json -hub-http "http://$HTTP_HOST:$HUB_HTTP_PORT" -credential-file "$DEV_DIR/user_bot.cred" 2>/dev/null || true)
 DECISION_ID=$(echo "$INSTALL_RESP" | python3 -c 'import sys, json; print(json.load(sys.stdin).get("decision_id", ""))' 2>/dev/null || true)
 if [[ -n "$DECISION_ID" ]]; then

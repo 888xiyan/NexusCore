@@ -192,7 +192,7 @@ func (s *Server) StreamTasks(req *pb.StreamTasksRequest, stream pb.BotRuntime_St
 		if ctx.Err() != nil {
 			return nil
 		}
-		job, err := s.sched.Lease(ctx, queue, actor.ID, configVersion)
+		job, err := s.sched.LeaseTask(ctx, queue, actor.ID, configVersion)
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
@@ -279,7 +279,7 @@ func (s *Server) SubscribeEvents(req *pb.SubscribeRequest, stream pb.BotRuntime_
 		if ctx.Err() != nil {
 			return nil
 		}
-		job, err := s.sched.Lease(ctx, group, actor.ID, nil)
+		job, err := s.sched.LeaseEvent(ctx, group, actor.ID)
 		if err != nil {
 			return status.Error(codes.Internal, err.Error())
 		}
@@ -288,13 +288,6 @@ func (s *Server) SubscribeEvents(req *pb.SubscribeRequest, stream pb.BotRuntime_
 			case <-ctx.Done():
 				return nil
 			case <-ticker.C:
-			}
-			continue
-		}
-		if job.JobType != scheduler.JobTypeEventDeliver {
-			// 非事件投递任务不属于本流，放回队列供对应任务流认领
-			if err := s.sched.Release(ctx, job.JobID, job.LeaseToken); err != nil {
-				log.Printf("grpcd: release non-event job %d failed: %v", job.JobID, err)
 			}
 			continue
 		}

@@ -306,15 +306,38 @@ func (s *Scheduler) Get(ctx context.Context, jobID int64) (*Job, error) {
 // Lease 认领任务：单事务内 UPDATE ... FROM (SELECT ... FOR UPDATE SKIP LOCKED) RETURNING。
 // 严格分区用 advisory lock 锁队头并检查同分区更早的非终态任务；宽松分区直接 SKIP LOCKED。
 func (s *Scheduler) Lease(ctx context.Context, queueName, workerID string, configVersion *int64) (*Job, error) {
+	return s.lease(ctx, queueName, workerID, configVersion, "", "")
+}
+
+// LeaseTask 只认领普通任务，避免任务流抢走 event.deliver 投递。
+func (s *Scheduler) LeaseTask(ctx context.Context, queueName, workerID string, configVersion *int64) (*Job, error) {
+	return s.lease(ctx, queueName, workerID, configVersion, " AND job_type <> $2", JobTypeEventDeliver)
+}
+
+// LeaseEvent 只认领持久事件投递，供 SubscribeEvents 消费。
+func (s *Scheduler) LeaseEvent(ctx context.Context, queueName, workerID string) (*Job, error) {
+	return s.lease(ctx, queueName, workerID, nil, " AND job_type = $2", JobTypeEventDeliver)
+}
+
+func (s *Scheduler) lease(ctx context.Context, queueName, workerID string, configVersion *int64, typeFilter, jobType string) (*Job, error) {
 	var leased *Job
 	err := s.st.WithKernelRuntimeTx(ctx, func(ctx context.Context, tx pgx.Tx) error {
-		rows, err := tx.Query(ctx, `
+		query := `
 			SELECT job_id, COALESCE(partition_key,'') FROM kernel_jobs
 			 WHERE queue_name=$1 AND status IN ('queued','retry_backoff')
-			   AND (next_retry_at IS NULL OR next_retry_at <= now())
+			   AND (next_retry_at IS NULL OR next_retry_at <= now())` + typeFilter + `
 			 ORDER BY priority DESC, job_id
 			 LIMIT 20
-			 FOR UPDATE SKIP LOCKED`, queueName)
+			 FOR UPDATE SKIP LOCKED`
+		var (
+			rows pgx.Rows
+			err  error
+		)
+		if typeFilter == "" {
+			rows, err = tx.Query(ctx, query, queueName)
+		} else {
+			rows, err = tx.Query(ctx, query, queueName, jobType)
+		}
 		if err != nil {
 			return fmt.Errorf("扫描可认领任务: %w", err)
 		}

@@ -70,6 +70,57 @@ func TestEnqueueAndLease(t *testing.T) {
 	}
 }
 
+func TestLeaseTaskAndEventAreIsolated(t *testing.T) {
+	s, _ := newScheduler(t, Options{})
+	ctx := context.Background()
+
+	taskReq := req("user_bot", "kind-task")
+	taskReq.JobType = "chat.task"
+	task, err := s.Enqueue(ctx, taskReq)
+	if err != nil {
+		t.Fatalf("入队任务: %v", err)
+	}
+	eventReq := req("user_bot", "kind-event")
+	eventReq.JobType = JobTypeEventDeliver
+	event, err := s.Enqueue(ctx, eventReq)
+	if err != nil {
+		t.Fatalf("入队事件: %v", err)
+	}
+
+	taskLease, err := s.LeaseTask(ctx, "user_bot", "bot-worker", nil)
+	if err != nil {
+		t.Fatalf("任务流认领: %v", err)
+	}
+	if taskLease == nil || taskLease.JobID != task.JobID {
+		t.Fatalf("任务流应只认领 chat.task，得到 %+v", taskLease)
+	}
+	eventLease, err := s.LeaseEvent(ctx, "user_bot", "event-worker")
+	if err != nil {
+		t.Fatalf("事件流认领: %v", err)
+	}
+	if eventLease == nil || eventLease.JobID != event.JobID {
+		t.Fatalf("事件流应只认领 event.deliver，得到 %+v", eventLease)
+	}
+}
+
+func TestLeaseTaskSkipsEventOnlyQueue(t *testing.T) {
+	s, _ := newScheduler(t, Options{})
+	ctx := context.Background()
+	eventReq := req("user_bot", "event-only")
+	eventReq.JobType = JobTypeEventDeliver
+	if _, err := s.Enqueue(ctx, eventReq); err != nil {
+		t.Fatalf("入队事件: %v", err)
+	}
+
+	leased, err := s.LeaseTask(ctx, "user_bot", "bot-worker", nil)
+	if err != nil {
+		t.Fatalf("任务流认领: %v", err)
+	}
+	if leased != nil {
+		t.Fatalf("任务流不得认领 event.deliver: %+v", leased)
+	}
+}
+
 func TestEnqueueRequiresCausalChain(t *testing.T) {
 	s, _ := newScheduler(t, Options{})
 	r := req("echo_bot", "k-no-causal")
