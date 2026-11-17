@@ -59,6 +59,12 @@ make smoke-m1       # M1 九步冒烟 + 边界验收 + 兜底轮询
 make smoke-m2       # M2 配置审批全链路、Bot 管理与两级进程生命周期冒烟
 make smoke-m3       # M3 单体记忆、简单 Agent 操控与群聊插件闭环冒烟
 make smoke-m4       # M4 11 步端到端全链路冒烟验收（前端构建+网关+群聊+记忆抽屉+Agent监控）
+make smoke-m5       # M5 本地 Agent 探测、CLI 驱动与结构化蒸馏冒烟
+make smoke-m6       # M6 Bot 工厂与 Agent 绑定插件闭环冒烟
+make smoke-m7       # M7 前端微模块动态加载与注册表冒烟
+make smoke-m8       # M8 基础模块无头化沉淀与 DAG 拓扑依赖治理冒烟
+make smoke-m9       # M9 全局 UI 原型、标准群聊与沙盒工具轨迹冒烟
+make smoke-m10      # M10 工具中心、MCP/Skill 与中台 Bot 代批审批冒烟
 make launch-m4      # M4 开发者全栈一键启动（Hub:7200 + Agent + GroupChat:7300 + Frontend:5173）
 make drill-crash-m1 # M1 崩溃恢复演练（真实 SIGKILL：hub / Bot / LISTEN）
 make clean          # 清 bin/
@@ -82,6 +88,7 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 
 | 文档 | 何时读 |
 | --- | --- |
+| [doc/README.md](doc/README.md) | **文档全景导航**；查阅各模块与里程碑详设分类索引 |
 | [doc/NexusCore架构设计总结.md](doc/NexusCore架构设计总结.md) | 上游总设计；本文档"架构边界"部分引用它 |
 | [doc/内核mvp/内核MVP详细设计.md](doc/内核mvp/内核MVP详细设计.md) | hub 10 模块 / kernel schema 数据模型 / 接口契约 / 验收标准（纯内核） |
 | [doc/ConfigCenter/ConfigCenter详细设计.md](doc/ConfigCenter/ConfigCenter详细设计.md) | 配置中心：四域配置 / PG 表 / proposal → security → user_bot → active / CLI |
@@ -89,11 +96,15 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 | [doc/MemoryPlugin/MemoryPlugin详细设计.md](doc/MemoryPlugin/MemoryPlugin详细设计.md) | 记忆插件：双 schema / 四象限 / 晋升 / 工具 API / 事件回投（M3/M4） |
 | [doc/MemoryPlugin/用户级Bot默认个人记忆架构.md](doc/MemoryPlugin/用户级Bot默认个人记忆架构.md) | user_xxx_bot 默认个人记忆四层栈 / Auto Dream / 注入约束 |
 | [doc/PluginMvp/PluginMvp详细设计.md](doc/PluginMvp/PluginMvp详细设计.md) | 四类插件 / manifest schema / 命名规范 / 生命周期 / 卸载 / **两级进程模型与插件进程关闭链路（§6）** |
+| [doc/M4开发总结.md](doc/M4开发总结.md) | M4 前端 Vue 3 工作台、网关 SSE、群聊视区与 Agent 监控实机演示 |
 | [doc/M5-本地Agent搜寻与调度闭环详细设计.md](doc/M5-本地Agent搜寻与调度闭环详细设计.md) | 本地 Agent 资产探测（Claude Code/Codex/Pi-Agent 等）、探针 LocalCLIDriver、Bot 结构化调度与防噪音蒸馏闭环 |
+| [doc/M6-Bot工厂与Agent绑定插件详细设计.md](doc/M6-Bot工厂与Agent绑定插件详细设计.md) | Bot 创建向导、角色模板库、200行单体记忆约束校验与本地 Agent 绑定装配 |
+| [doc/M7-前端微模块化与插件注册表详细设计.md](doc/M7-前端微模块化与插件注册表详细设计.md) | Vite ESM 动态挂载、纯净 Shell、PluginRegistry 与微模块代码分割 |
 | [doc/M8-基础模块沉淀与接口设计.md](doc/M8-基础模块沉淀与接口设计.md) | 基础模块下沉无头化、契约接口设计、DAG 拓扑加载与依赖生命周期治理 |
 | [doc/M9-标准群聊插件与全局UI注册详细设计.md](doc/M9-标准群聊插件与全局UI注册详细设计.md) | v0.1.0 核心：群聊标准插件自治 UI、注册进全局 UI、聚合五大零散功能与独立 Schema 时序存储 |
 | [doc/系统Update-全局UI原型与沙盒工具轨迹审计详细设计.md](doc/系统Update-全局UI原型与沙盒工具轨迹审计详细设计.md) | 全局 UI 页面原型规范（左右两段式分栏 + @xxx 输入框）、内置沙盒记录工具轨迹、三层 Bot 与安全审批流 |
-| [doc/开发规划.md](doc/开发规划.md) | M0-M9 里程碑 / 估计 / 停线点 |
+| [doc/M10-工具中心与中台Bot代批审批详细设计.md](doc/M10-工具中心与中台Bot代批审批详细设计.md) | v0.2.0 生态：独立工具插件（系统工具/可编辑Skill/外部MCP）、`bot_tool_grants` 授权矩阵、中台 Bot 受控代批 RBAC |
+| [doc/开发规划.md](doc/开发规划.md) | M0-M10 里程碑 / 估计 / 停线点 |
 | [doc/NexusCore待修正问题清单.md](doc/NexusCore待修正问题清单.md) | D-11 / D-12（未解决问题，均属插件内部或业务契约） |
 | [doc/NexusCore已修正问题归档.md](doc/NexusCore已修正问题归档.md) | D-01 至 D-10 / D-13 至 D-23（已解决） |
 

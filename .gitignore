@@ -26,6 +26,7 @@ workbench/node_modules/
 workbench/dist/
 Frontend/node_modules/
 Frontend/dist/
+hub/web/dist/assets/
 
 # 编辑器与系统
 .idea/

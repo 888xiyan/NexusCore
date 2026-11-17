@@ -1,0 +1,251 @@
+name: Release & Multi-Platform Distribution
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  # ==========================================================
+  # 阶段 1: 前端构建并缓存 dist 供全平台复用
+  # ==========================================================
+  build-frontend:
+    name: Build Frontend SPA
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: 'npm'
+          cache-dependency-path: Frontend/package-lock.json
+
+      - name: Install Frontend Dependencies & Build
+        run: |
+          cd Frontend
+          npm install
+          npm run build
+
+      - name: Upload Frontend Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: Frontend/dist/
+          retention-days: 1
+
+  # ==========================================================
+  # 阶段 2: 交叉编译多平台二进制包 (Win, Linux, Deb, macOS)
+  # ==========================================================
+  build-binaries:
+    name: Build Binaries (${{ matrix.target.os }}/${{ matrix.target.arch }})
+    needs: build-frontend
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - { os: linux, arch: amd64, ext: "" }
+          - { os: linux, arch: arm64, ext: "" }
+          - { os: windows, arch: amd64, ext: ".exe" }
+          - { os: darwin, arch: amd64, ext: "" }
+          - { os: darwin, arch: arm64, ext: "" }
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+          cache: true
+
+      - name: Download Frontend Artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: frontend-dist
+          path: hub/web/dist
+
+      - name: Cross Compile Binaries & Plugins
+        env:
+          GOOS: ${{ matrix.target.os }}
+          GOARCH: ${{ matrix.target.arch }}
+          CGO_ENABLED: 0
+          EXT: ${{ matrix.target.ext }}
+        run: |
+          PKG_NAME="nexuscore-${{ github.ref_name }}-${{ matrix.target.os }}-${{ matrix.target.arch }}"
+          TARGET_DIR="dist/${PKG_NAME}"
+          mkdir -p "${TARGET_DIR}/bin" "${TARGET_DIR}/bin/plugins" "${TARGET_DIR}/migrations"
+
+          # 编译微内核 5 大核心二进制
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/hub${EXT}" ./hub
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/bot-runtime${EXT}" ./bot-runtime
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/agent-daemon${EXT}" ./agent-daemon
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/cli${EXT}" ./cli
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/migrate${EXT}" ./cmd/migrate
+
+          # 编译独立插件二进制
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/plugins/plugin_memory${EXT}" ./plugins/plugin_memory
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/plugins/plugin_groupchat${EXT}" ./GroupChatPlugin
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/plugins/plugin_agent_discovery${EXT}" ./plugins/plugin_agent_discovery
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/plugins/plugin_bot_creator${EXT}" ./plugins/plugin_bot_creator
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/plugins/plugin_demo${EXT}" ./plugins/plugin_demo
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/plugins/plugin_tool_center${EXT}" ./plugins/plugin_tool_center
+          go build -ldflags="-s -w" -o "${TARGET_DIR}/bin/plugins/plugin_marketplace${EXT}" ./plugins/plugin_marketplace
+
+          # 复制数据库迁移与说明
+          cp -r migrations/* "${TARGET_DIR}/migrations/"
+          cp README.md "${TARGET_DIR}/"
+
+          # 打包
+          mkdir -p release-assets
+          if [ "${{ matrix.target.os }}" = "windows" ]; then
+            cd dist && zip -r "../../release-assets/${PKG_NAME}.zip" "${PKG_NAME}" && cd ..
+          else
+            cd dist && tar -czvf "../../release-assets/${PKG_NAME}.tar.gz" "${PKG_NAME}" && cd ..
+          fi
+
+      - name: Build Debian Package (.deb) for Linux amd64
+        if: matrix.target.os == 'linux' && matrix.target.arch == 'amd64'
+        run: |
+          RAW_VER="${{ github.ref_name }}"
+          CLEAN_VER="${RAW_VER#v}"
+          DEB_ROOT="deb_root"
+          mkdir -p "${DEB_ROOT}/DEBIAN"
+          mkdir -p "${DEB_ROOT}/usr/local/bin"
+          mkdir -p "${DEB_ROOT}/usr/local/share/nexuscore/plugins"
+          mkdir -p "${DEB_ROOT}/usr/local/share/nexuscore/migrations"
+
+          # 拷贝编译好的二进制与资源
+          PKG_NAME="nexuscore-${{ github.ref_name }}-linux-amd64"
+          cp "dist/${PKG_NAME}/bin/hub" "${DEB_ROOT}/usr/local/bin/nexus-hub"
+          cp "dist/${PKG_NAME}/bin/bot-runtime" "${DEB_ROOT}/usr/local/bin/nexus-bot-runtime"
+          cp "dist/${PKG_NAME}/bin/agent-daemon" "${DEB_ROOT}/usr/local/bin/nexus-agent-daemon"
+          cp "dist/${PKG_NAME}/bin/cli" "${DEB_ROOT}/usr/local/bin/nexus-cli"
+          cp "dist/${PKG_NAME}/bin/migrate" "${DEB_ROOT}/usr/local/bin/nexus-migrate"
+          cp -r "dist/${PKG_NAME}/bin/plugins"/* "${DEB_ROOT}/usr/local/share/nexuscore/plugins/"
+          cp -r migrations/* "${DEB_ROOT}/usr/local/share/nexuscore/migrations/"
+
+          # 生成 control 元数据
+          cat <<EOF > "${DEB_ROOT}/DEBIAN/control"
+          Package: nexuscore
+          Version: ${CLEAN_VER}
+          Section: utils
+          Priority: optional
+          Architecture: amd64
+          Maintainer: NexusCore Team <admin@nexuscore.dev>
+          Description: NexusCore - Personal Intelligent Workspace based on Microkernel Architecture
+           Personal intelligent workstation with built-in memory stack, multi-bot groupchat,
+           and cross-device agent mesh.
+          EOF
+
+          # 生成并校验 deb 安装包
+          dpkg-deb --build "${DEB_ROOT}" "release-assets/nexuscore_${CLEAN_VER}_amd64.deb"
+
+      - name: Upload Release Binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: assets-${{ matrix.target.os }}-${{ matrix.target.arch }}
+          path: release-assets/*
+          retention-days: 1
+
+  # ==========================================================
+  # 阶段 3: Docker 多阶段构建与多架构推送 (GHCR)
+  # ==========================================================
+  build-docker:
+    name: Build & Push Docker Image
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to GitHub Container Registry (GHCR)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Extract Docker metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=raw,value=latest
+
+      - name: Build and Push Docker Image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ==========================================================
+  # 阶段 4: 发布 GitHub Release 并挂载所有二进制资产
+  # ==========================================================
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-binaries, build-docker]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@v4
+
+      - name: Download All Assets
+        uses: actions/download-artifact@v4
+        with:
+          pattern: assets-*
+          path: dist-release
+          merge-multiple: true
+
+      - name: Generate Release Notes & Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist-release/*
+          name: "Release ${{ github.ref_name }}"
+          generate_release_notes: true
+          body: |
+            ## NexusCore Release ${{ github.ref_name }}
+
+            以微内核为基础的个人智能工作台。本次发布包含：
+            - 内嵌前端 Web 静态工作台的统一网关服务二进制；
+            - 包含 Windows (`.zip`)、Linux/Debian (`.deb` / `.tar.gz`)、macOS (`.tar.gz`) 安装包；
+            - Docker 多架构官方镜像（支持 `linux/amd64` 与 `linux/arm64`）。
+
+            ### 📦 Docker 快速拉取使用
+            ```bash
+            docker pull ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            docker run -d -p 7200:7200 --name nexuscore ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+            ```
+
+            ### 💻 平台安装说明
+            - **Debian / Ubuntu**:
+              ```bash
+              sudo dpkg -i nexuscore_*_amd64.deb
+              nexus-hub
+              ```
+            - **macOS (Apple Silicon / Intel)**:
+              解压 `.tar.gz` 即可直接运行。*注意：本版本暂未包含 Apple 商业签名与公证，首次运行若受 Gatekeeper 拦截，请在系统设置中允许或执行：*
+              ```bash
+              xattr -d com.apple.quarantine ./bin/hub
+              ```
+            - **Windows**:
+              解压 `.zip` 后直接执行 `bin\hub.exe` 启动。

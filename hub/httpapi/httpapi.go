@@ -27,6 +27,7 @@ import (
 	"github.com/888xiyan/NexusCore/hub/store"
 	"github.com/888xiyan/NexusCore/hub/supervisor"
 	"github.com/888xiyan/NexusCore/hub/transport"
+	"github.com/888xiyan/NexusCore/hub/web"
 	"github.com/888xiyan/NexusCore/internal/envelope"
 	"github.com/888xiyan/NexusCore/internal/modules/toolcenter"
 	"github.com/888xiyan/NexusCore/memory"
@@ -352,6 +353,9 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/marketplace/download", a.handleMarketplaceDownload)
 	mux.HandleFunc("POST /v1/marketplace/install", a.handleMarketplaceInstall)
 	mux.HandleFunc("POST /v1/marketplace/uninstall", a.handleMarketplaceUninstall)
+
+	// 前端 SPA 静态资源托管（嵌入式前端，支持客户端路由 fallback）
+	mux.Handle("GET /", web.Handler())
 
 	return a.withCORS(mux)
 }
