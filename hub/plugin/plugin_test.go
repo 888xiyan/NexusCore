@@ -480,7 +480,7 @@ func (m *mockTx) CopyFrom(ctx context.Context, tableName pgx.Identifier, columnN
 	return 0, nil
 }
 func (m *mockTx) SendBatch(ctx context.Context, b *pgx.Batch) pgx.BatchResults { return nil }
-func (m *mockTx) LargeObjects() pgx.LargeObjects                              { return pgx.LargeObjects{} }
+func (m *mockTx) LargeObjects() pgx.LargeObjects                               { return pgx.LargeObjects{} }
 func (m *mockTx) Prepare(ctx context.Context, name, sql string) (*pgconn.StatementDescription, error) {
 	return nil, nil
 }
@@ -494,7 +494,7 @@ func (m *mockTx) Query(ctx context.Context, sql string, args ...any) (pgx.Rows, 
 	return nil, nil
 }
 func (m *mockTx) QueryRow(ctx context.Context, sql string, args ...any) pgx.Row { return nil }
-func (m *mockTx) Conn() *pgx.Conn                                                { return nil }
+func (m *mockTx) Conn() *pgx.Conn                                               { return nil }
 
 func TestActivatePluginWithMockTx(t *testing.T) {
 	ctx := context.Background()
@@ -631,12 +631,12 @@ func TestManagerExtendedCoverage(t *testing.T) {
 		t.Errorf("不存在的决策撤销未返回 ErrDecisionNotFound: %v", err)
 	}
 
-	// 8. Disable 与 Uninstall 针对未知插件
-	if err := mgr.Disable(ctx, userActor, "plugin_unknown"); err != nil {
-		t.Errorf("Disable 未知插件报错: %v", err)
+	// 8. Disable 与 Uninstall 针对未知插件：失败也要留底
+	if err := mgr.Disable(ctx, userActor, "plugin_unknown"); !errors.Is(err, ErrPluginNotFound) {
+		t.Errorf("Disable 未知插件应返回 ErrPluginNotFound: %v", err)
 	}
-	if err := mgr.Uninstall(ctx, userActor, "plugin_unknown", false, false); err != nil {
-		t.Errorf("Uninstall 未知插件报错: %v", err)
+	if err := mgr.Uninstall(ctx, userActor, "plugin_unknown", false, false); !errors.Is(err, ErrPluginNotFound) {
+		t.Errorf("Uninstall 未知插件应返回 ErrPluginNotFound: %v", err)
 	}
 
 	// 9. BuildSystemDAG 空 DAG

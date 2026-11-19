@@ -1,7 +1,9 @@
 package toolcenter
 
 import (
+	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 )
@@ -140,6 +142,17 @@ func TestToolCenterService_ExecutionAndNetworkAudit(t *testing.T) {
 	botID := "search_bot"
 	searchTool := "sys.search.web"
 
+	if err := svc.GrantTool(BotToolGrant{
+		BotID:      botID,
+		ToolID:     searchTool,
+		Permission: PermissionExecute,
+	}); !errors.Is(err, ErrToolNotNamed) {
+		t.Fatalf("未点名 Bot 授予搜索工具应被拒绝，实际: %v", err)
+	}
+	if err := svc.SetNamedBots(searchTool, []string{botID}); err != nil {
+		t.Fatalf("点名搜索 Bot 失败: %v", err)
+	}
+
 	// 授予执行权限
 	_ = svc.GrantTool(BotToolGrant{
 		BotID:      botID,
@@ -157,9 +170,30 @@ func TestToolCenterService_ExecutionAndNetworkAudit(t *testing.T) {
 		}
 	})
 
-	// 执行网络搜索工具
-	res, err := svc.ExecuteTool(botID, searchTool, map[string]interface{}{
+	// 没有 URL 的检索不外联，也不发审计
+	offline, err := svc.ExecuteTool(botID, searchTool, map[string]interface{}{
 		"query": "NexusCore architecture",
+	}, func() (string, int, error) {
+		return "Found 10 results", 0, nil
+	})
+	if err != nil {
+		t.Fatalf("离线检索报错: %v", err)
+	}
+	if offline.NetworkTriggered || notified {
+		t.Fatalf("纯文本检索不应外联: %+v notified=%v", offline, notified)
+	}
+	if offline.Output != "Found 10 results" {
+		t.Errorf("蒸馏后的短输出应保持原文: %+v", offline)
+	}
+
+	svc.SetEgressDialer(func(ctx context.Context, rawURL string) (string, error) {
+		if !strings.Contains(rawURL, "https://example.com/") {
+			t.Errorf("拨号地址不符: %s", rawURL)
+		}
+		return "example.com", nil
+	})
+	res, err := svc.ExecuteTool(botID, searchTool, map[string]interface{}{
+		"query": "https://example.com/search?q=nexus",
 	}, func() (string, int, error) {
 		return "Found 10 results", 0, nil
 	})
@@ -173,8 +207,12 @@ func TestToolCenterService_ExecutionAndNetworkAudit(t *testing.T) {
 	if !res.NetworkTriggered {
 		t.Errorf("预期标记 network_triggered = true")
 	}
-	if !notified || egressTarget != "NexusCore architecture" {
+	if !notified || egressTarget != "example.com" {
 		t.Errorf("网络审计告警未触发或目标不匹配: notified=%v, target=%s", notified, egressTarget)
+	}
+	audits := svc.ListAudit("user_bot")
+	if len(audits) != 1 || audits[0].Domain != "example.com" || audits[0].FromBotID != botID {
+		t.Fatalf("应向 user_bot 投递搜索审计: %+v", audits)
 	}
 
 	// 未授权执行拦截

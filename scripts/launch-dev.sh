@@ -38,6 +38,7 @@ HUB_HTTP_PORT="${HUB_HTTP_PORT:-7200}"
 HUB_GRPC_PORT="${HUB_GRPC_PORT:-7201}"
 HUB_TRANSPORT_PORT="${HUB_TRANSPORT_PORT:-7202}"
 CHAT_PORT="${CHAT_PORT:-7300}"
+TOOL_CENTER_PORT="${TOOL_CENTER_PORT:-7400}"
 FRONTEND_PORT="${FRONTEND_PORT:-5173}"
 
 DEV_DIR="$ROOT/data/dev_run"
@@ -69,7 +70,7 @@ declare -A SERVICE_PGIDS
 
 # --- 预检清理占用端口 ---
 cleanup_stale_ports() {
-  local ports=("$HUB_HTTP_PORT" "$HUB_GRPC_PORT" "$HUB_TRANSPORT_PORT" "$CHAT_PORT" "$FRONTEND_PORT")
+  local ports=("$HUB_HTTP_PORT" "$HUB_GRPC_PORT" "$HUB_TRANSPORT_PORT" "$CHAT_PORT" "$TOOL_CENTER_PORT" "$FRONTEND_PORT")
   for p in "${ports[@]}"; do
     if command -v fuser >/dev/null 2>&1; then
       fuser -k "${p}/tcp" 2>/dev/null || true
@@ -100,6 +101,13 @@ teardown() {
     fi
     pkill -f "vite.*$FRONTEND_PORT" 2>/dev/null || true
     pkill -f "vite.*5173" 2>/dev/null || true
+    printf "${C_GREEN}[OK]${C_RESET}\n"
+  fi
+
+  # 1b. 停止工具中心（先于 Hub，目录已落盘）
+  if [[ -n "${SERVICE_PIDS[toolcenter]:-}" ]]; then
+    printf "  停止 plugin_tool_center (PID %s)... " "${SERVICE_PIDS[toolcenter]}"
+    kill -TERM "${SERVICE_PIDS[toolcenter]}" 2>/dev/null || true
     printf "${C_GREEN}[OK]${C_RESET}\n"
   fi
 
@@ -331,6 +339,28 @@ fi
 log_ok "GroupChatPlugin 服务已就绪 (PID: ${GROUPCHAT_PID:-managed})"
 
 # ==============================================================================
+# 步骤 4b：启动工具中心（自有目录，重启后授权仍在）
+# ==============================================================================
+log_info "4b. 启动 plugin_tool_center (:${TOOL_CENTER_PORT})..."
+TOOL_DATA_DIR="$ROOT/data/plugins/plugin_tool_center"
+mkdir -p "$TOOL_DATA_DIR"
+if [[ -x "$ROOT/bin/plugins/plugin_tool_center" ]]; then
+  ./bin/plugins/plugin_tool_center -port "$TOOL_CENTER_PORT" -data "$TOOL_DATA_DIR" \
+    >"$LOG_DIR/tool_center.log" 2>&1 &
+  TOOL_PID=$!
+  SERVICE_PIDS[toolcenter]=$TOOL_PID
+  echo "$TOOL_PID" > "$PID_DIR/tool_center.pid"
+  for _ in $(seq 1 30); do
+    curl -sf "http://$HTTP_HOST:$TOOL_CENTER_PORT/healthz" >/dev/null 2>&1 && break
+    sleep 0.2
+  done
+  curl -sf "http://$HTTP_HOST:$TOOL_CENTER_PORT/healthz" >/dev/null || dump_log_and_exit "plugin_tool_center" "$LOG_DIR/tool_center.log"
+  log_ok "plugin_tool_center 已就绪 (PID: $TOOL_PID)"
+else
+  log_warn "bin/plugins/plugin_tool_center 不存在，跳过工具中心"
+fi
+
+# ==============================================================================
 # 步骤 5：启动 Frontend Vue 3 开发服务器 (:5173)
 # ==============================================================================
 if [[ -d "Frontend" && -f "Frontend/package.json" ]]; then
@@ -368,6 +398,9 @@ printf "${C_BOLD}                    NexusCore M4 智能工作台开发环境   
 printf "${C_CYAN}================================================================================${C_RESET}\n"
 printf " ${C_GREEN}[✓]${C_RESET} Kernel Hub Gateway   ${C_BOLD}http://%s:%d${C_RESET}    PID: %-7s 日志: %s\n" "$HTTP_HOST" "$HUB_HTTP_PORT" "${SERVICE_PIDS[hub]:-N/A}" "$LOG_DIR/hub.log"
 printf " ${C_GREEN}[✓]${C_RESET} GroupChatPlugin      ${C_BOLD}http://%s:%d${C_RESET}    PID: %-7s 日志: %s\n" "$HTTP_HOST" "$CHAT_PORT" "${SERVICE_PIDS[groupchat]:-N/A}" "$LOG_DIR/hub.log (supervisor)"
+if [[ -n "${SERVICE_PIDS[toolcenter]:-}" ]]; then
+printf " ${C_GREEN}[✓]${C_RESET} Tool Center          ${C_BOLD}http://%s:%d${C_RESET}    PID: %-7s 日志: %s\n" "$HTTP_HOST" "$TOOL_CENTER_PORT" "${SERVICE_PIDS[toolcenter]}" "$LOG_DIR/tool_center.log"
+fi
 printf " ${C_GREEN}[✓]${C_RESET} Agent Daemon         ${C_BOLD}%s:%d (TCP)${C_RESET}     PID: %-7s 日志: %s\n" "$HTTP_HOST" "$HUB_TRANSPORT_PORT" "${SERVICE_PIDS[agent]:-N/A}" "$LOG_DIR/agent.log"
 if [[ -n "${SERVICE_PIDS[frontend]:-}" ]]; then
 printf " ${C_GREEN}[✓]${C_RESET} Frontend Workbench   ${C_BOLD}http://%s:%d${C_RESET}    PID: %-7s 日志: %s\n" "$HTTP_HOST" "$FRONTEND_PORT" "${SERVICE_PIDS[frontend]}" "$LOG_DIR/frontend.log"

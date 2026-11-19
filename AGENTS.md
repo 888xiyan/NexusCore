@@ -65,6 +65,7 @@ make smoke-m7       # M7 前端微模块动态加载与注册表冒烟
 make smoke-m8       # M8 基础模块无头化沉淀与 DAG 拓扑依赖治理冒烟
 make smoke-m9       # M9 全局 UI 原型、标准群聊与沙盒工具轨迹冒烟
 make smoke-m10      # M10 工具中心、MCP/Skill 与中台 Bot 代批审批冒烟
+make smoke-m11      # M11 Bot 身份可列举与安装留底冒烟
 make launch-m4      # M4 开发者全栈一键启动（Hub:7200 + Agent + GroupChat:7300 + Frontend:5173）
 make drill-crash-m1 # M1 崩溃恢复演练（真实 SIGKILL：hub / Bot / LISTEN）
 make clean          # 清 bin/
@@ -96,7 +97,7 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 | [doc/MemoryPlugin/MemoryPlugin详细设计.md](doc/MemoryPlugin/MemoryPlugin详细设计.md) | 记忆插件：双 schema / 四象限 / 晋升 / 工具 API / 事件回投（M3/M4） |
 | [doc/MemoryPlugin/用户级Bot默认个人记忆架构.md](doc/MemoryPlugin/用户级Bot默认个人记忆架构.md) | user_xxx_bot 默认个人记忆四层栈 / Auto Dream / 注入约束 |
 | [doc/PluginMvp/PluginMvp详细设计.md](doc/PluginMvp/PluginMvp详细设计.md) | 四类插件 / manifest schema / 命名规范 / 生命周期 / 卸载 / **两级进程模型与插件进程关闭链路（§6）** |
-| [doc/milestones/README.md](doc/milestones/README.md) | M4–M10 里程碑详设索引 |
+| [doc/milestones/README.md](doc/milestones/README.md) | M4–M10 详设索引；M18/M19 规格；M11–M17 见开发规划 |
 | [doc/milestones/M4-前端工作台.md](doc/milestones/M4-前端工作台.md) | M4 前端 Vue 3 工作台、网关 SSE、群聊视区与 Agent 监控实机演示 |
 | [doc/milestones/M5-本地Agent搜寻.md](doc/milestones/M5-本地Agent搜寻.md) | 本地 Agent 资产探测（Claude Code/Codex/Pi-Agent 等）、探针 LocalCLIDriver、Bot 结构化调度与防噪音蒸馏闭环 |
 | [doc/milestones/M6-Bot工厂.md](doc/milestones/M6-Bot工厂.md) | Bot 创建向导、角色模板库、200行单体记忆约束校验与本地 Agent 绑定装配 |
@@ -104,8 +105,11 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 | [doc/milestones/M8-基础模块与依赖治理.md](doc/milestones/M8-基础模块与依赖治理.md) | 基础模块下沉无头化、契约接口、DAG 拓扑加载与依赖生命周期治理 |
 | [doc/milestones/M9-标准群聊与全局UI.md](doc/milestones/M9-标准群聊与全局UI.md) | v0.1.0 核心：群聊标准插件自治 UI、注册进全局 UI、独立 Schema 时序存储 |
 | [doc/milestones/系统Update-全局UI与沙盒轨迹.md](doc/milestones/系统Update-全局UI与沙盒轨迹.md) | 全局 UI 页面原型（左右两段式分栏 + @xxx 输入框）、内置沙盒记录工具轨迹、三层 Bot 与安全审批流 |
-| [doc/milestones/M10-工具中心与代批.md](doc/milestones/M10-工具中心与代批.md) | v0.2.0 生态：独立工具插件（系统工具/可编辑Skill/外部MCP）、`bot_tool_grants` 授权矩阵、中台 Bot 受控代批 RBAC |
-| [doc/开发规划.md](doc/开发规划.md) | M0-M10 里程碑 / 估计 / 停线点 |
+| [doc/milestones/M10-工具中心与代批.md](doc/milestones/M10-工具中心与代批.md) | v0.2.0 演示：工具插件与按动作名分档的代批。持久化已在 M12；真审批在 M14 / M15 |
+| [doc/milestones/系统Update-需求规格.md](doc/milestones/系统Update-需求规格.md) | 系统 Update 需求 R1–R22。与界面专篇冲突时以本文为准 |
+| [doc/milestones/M18-业务插件需求规格.md](doc/milestones/M18-业务插件需求规格.md) | 规格定稿待实现：`plugin_pm`、Ingress、Obsidian 只读查询 |
+| [doc/milestones/M19-模型与执行路由.md](doc/milestones/M19-模型与执行路由.md) | 规格定稿待实现：可选 `plugin_model_router` |
+| [doc/开发规划.md](doc/开发规划.md) | M0–M19 里程碑 / 估计 / 停线点。文首为 2026-11-19 进度 |
 | [doc/NexusCore待修正问题清单.md](doc/NexusCore待修正问题清单.md) | D-11 / D-12（未解决问题，均属插件内部或业务契约） |
 | [doc/NexusCore已修正问题归档.md](doc/NexusCore已修正问题归档.md) | D-01 至 D-10 / D-13 至 D-23（已解决） |
 
@@ -177,8 +181,13 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 | M6 Bot 工厂与 Agent 绑定插件 | 已完成 | 详设定版（`doc/milestones/M6-Bot工厂.md`），独立插件 `plugin_bot_creator`、预设角色模板库（Reviewer/Coder/Ops）、蓝图与保留名/200行记忆校验、Agent 绑定参数装配、前端创建向导（Vue 3）与端到端自动化冒烟（`make smoke-m6`）全链路通过 |
 | M7 前端微模块化与插件注册表 | 已完成 | 方案 A（Vite ESM 动态导入）：宿主纯净 Shell 骨架（100% 剥离业务硬编码）+ 插件注册表（PluginRegistry）、UI 契约与运行时共享规范（`window.__NEXUS_CORE__`）、微模块独立代码分割（GroupChat / Agent Discovery / Bot Creator）与端到端自动化冒烟（`make smoke-m7`）全链路通过 |
 | M8 基础模块沉淀与依赖治理 | 已完成 | 核心能力下沉无头化（100% 剥离 UI，涵盖 GroupChat、AgentMesh、BotFactory），单测覆盖率全量 ≥ 85%；能力契约入配置中心（SemVer），业务插件清单声明依赖；内核 DAG 拓扑排序加载（Kahn 算法）；环路静态检测（三色标记 DFS）+ 依赖深度硬限制（Max Depth ≤ 2）+ 逆序安全级联卸载 + 两阶段平滑滚动热更新；端到端自动化验收 `make smoke-m8` 10 步全链路通过 |
-| M9 全局UI原型、标准群聊与沙盒轨迹 | 已完成（v0.1.0 旗舰） | 落地手绘原型左右两段导航（纪事/工坊）+ 右侧居中 @ 输入框；标准群聊微前端自治；**内置沙盒记录 Bots 使用工具轨迹**；独立 Schema 存储与原生 UI 主题；`make smoke-m9` 10 步全链路通过 |
-| M10 工具中心、MCP/Skill与中台Bot审批 | 已完成（v0.2.0 生态） | 独立工具插件（系统工具/可编辑Skill/外部MCP）、`bot_tool_grants` 授权矩阵、插件商场与三阶段审批流、中台 Bot 受控代批 RBAC（严禁代批高危操作）、`make smoke-m10` 11 步全链路通过 |
+| M9 全局 UI 原型、标准群聊与沙盒轨迹 | 演示完成（v0.1.0） | `make smoke-m9` 通过。默认离线已由 M13 验收；入群过滤与纪事真实数据留在 M16 |
+| M10 工具中心与中台代批 | 演示完成（v0.2.0） | `make smoke-m10` 通过。工具持久化已由 M12 验收；checksum 安装与代批身份核对留在 M14 / M15 |
+| M11 身份与安装留底 | 已合入（`7624be4`） | `plugin_category`、Bot 身份可列举、安装/升级/停用/卸载成败写入 `kernel_config_audit`。`plugin_type` CHECK 未改。回归 `make smoke-m11` |
+| M12 工具持久化与授权 | 已验收 | `plugin_tool_center` 自有目录保存 Skill / MCP 登记 / 授权；搜索默认强绑。回归 `make smoke-m12` |
+| M13 沙箱、搜索通知与 Agent 绑定 | 已验收 | 默认离线；已授权搜索走 DNS/HTTPS 并通知 `user_bot`；未绑定探针不能派发 CLI。回归 `make smoke-m13` |
+| M14–M17 需求规格补齐 | 未开工 | 下载审批、中台助手、设置与纪事、业务插件接入标准 |
+| M18 业务插件 / M19 模型路由 | 规格定稿，待实现 | 见 `doc/milestones/M18-业务插件需求规格.md` 与 `M19-模型与执行路由.md` |
 
 ## 常见禁忌（先问用户再做）
 

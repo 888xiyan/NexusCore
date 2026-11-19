@@ -156,6 +156,8 @@ NexusCore 严守以下核心工程规范：
 | `make test-pg` | 运行真实 PostgreSQL 集成测试 |
 | `make smoke-m9` | 运行 M9 全局 UI 原型、标准群聊与沙盒工具轨迹全链路冒烟验收 |
 | `make smoke-m10` | 运行 M10 工具中心、MCP/Skill 插件化治理与中台审批闭环验收 |
+| `make smoke-m11` | 运行 M11 Bot 身份可列举与安装留底验收 |
+| `make smoke-m12` | 运行 M12 工具持久化与授权验收：重启后 Skill 与授权仍在，未点名 Bot 不能获得搜索 |
 | `make clean` | 清除编译输出产物 |
 
 ---

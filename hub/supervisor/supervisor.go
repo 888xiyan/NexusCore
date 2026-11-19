@@ -389,7 +389,7 @@ func (s *Supervisor) startLocked(ctx context.Context, botID string) error {
 		args = append(args, "-agent-cli", m.boundAgentCLI)
 	}
 	if m.boundAgentID != "" {
-		args = append(args, "-agent-id", m.boundAgentID)
+		args = append(args, "-agent-id", m.boundAgentID, "-agent-bound")
 	}
 
 	cmd := exec.Command(m.binaryPath, args...)

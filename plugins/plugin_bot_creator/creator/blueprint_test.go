@@ -43,6 +43,15 @@ func TestValidateBlueprint(t *testing.T) {
 			wantValid: false,
 		},
 		{
+			name: "拦截保留前缀 create_",
+			bp: BotBlueprint{
+				BotID:        "create_helper_bot",
+				DisplayName:  "越权",
+				SystemPrompt: "测试",
+			},
+			wantValid: false,
+		},
+		{
 			name: "拦截非法 bot_id",
 			bp: BotBlueprint{
 				BotID:        "bad-name!",

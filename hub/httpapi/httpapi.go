@@ -90,8 +90,10 @@ type API struct {
 	trajectoryMu sync.RWMutex
 	trajectories []ToolTrajectory
 
-	// 工具中心与中台代批 RBAC (M10)
-	toolCenter *toolcenter.ToolCenterService
+	// 工具中心与中台代批 RBAC (M10)。toolUpstream 非空时工具读写转发到插件，Hub 不留正文。
+	toolCenter   *toolcenter.ToolCenterService
+	toolUpstream string
+	toolHTTP     *http.Client
 
 	// FixtureBinder 由 hub 注入，用于 M1 冒烟夹具绑定真实二进制（M2 起由插件 install 取代）
 	FixtureBinder func(ctx context.Context) error
@@ -326,6 +328,7 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("GET /v1/bots/{bot_id}", a.handleBotGet)
 	mux.HandleFunc("GET /v1/bots/{bot_id}/memory", a.handleBotMemoryGet)
 	mux.HandleFunc("PUT /v1/bots/{bot_id}/memory", a.handleBotMemoryPut)
+	mux.HandleFunc("PUT /v1/bots/{bot_id}/binding", a.handleBotBinding)
 	mux.HandleFunc("POST /v1/bots/{bot_id}/restart", a.handleBotRestart)
 	mux.HandleFunc("GET /v1/chat/messages", a.handleChatMessagesGet)
 	mux.HandleFunc("POST /v1/chat/messages", a.handleChatMessagesPost)
@@ -340,6 +343,11 @@ func (a *API) Handler() http.Handler {
 	mux.HandleFunc("POST /v1/tools/skills", a.handleSkillCreate)
 	mux.HandleFunc("PUT /v1/tools/skills/{tool_id}", a.handleSkillUpdate)
 	mux.HandleFunc("DELETE /v1/tools/skills/{tool_id}", a.handleSkillDelete)
+	mux.HandleFunc("GET /v1/tools/skills/{tool_id}/revisions", a.handleToolRelayOnly)
+	mux.HandleFunc("POST /v1/tools/mcp", a.handleToolRelayOnly)
+	mux.HandleFunc("PUT /v1/tools/mcp/{tool_id}", a.handleToolRelayOnly)
+	mux.HandleFunc("PUT /v1/tools/named-bots/{tool_id}", a.handleToolRelayOnly)
+	mux.HandleFunc("GET /v1/tools/traces", a.handleToolRelayOnly)
 	mux.HandleFunc("GET /v1/tools/grants", a.handleGrantsList)
 	mux.HandleFunc("POST /v1/tools/grants", a.handleGrantTool)
 	mux.HandleFunc("POST /v1/tools/grants/revoke", a.handleRevokeGrant)
@@ -1006,11 +1014,8 @@ func (a *API) handleBotCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "bot_id 不能为空")
 		return
 	}
-	reserved := map[string]bool{
-		config.UserBot: true, config.CreateBot: true, config.MonitorBot: true, config.SecurityBot: true,
-	}
-	if reserved[req.BotID] {
-		writeErr(w, http.StatusBadRequest, "禁止创建内核保留名 Bot")
+	if reason := plugin.RejectedBotID(req.BotID); reason != "" {
+		writeErr(w, http.StatusBadRequest, reason)
 		return
 	}
 
@@ -1745,6 +1750,7 @@ func (a *API) handleBotGet(w http.ResponseWriter, r *http.Request) {
 	lines := memory.CountLines(content)
 
 	identity, identities := plugin.ClassifyBotIdentity(botID, role, a.installedManifests(r.Context()))
+	boundAgentID, boundAgentCLI := parseAgentBinding(capabilities)
 	resp := map[string]any{
 		"bot_id":          botID,
 		"role":            role,
@@ -1753,6 +1759,8 @@ func (a *API) handleBotGet(w http.ResponseWriter, r *http.Request) {
 		"display_name":    displayName,
 		"activation_mode": actMode,
 		"capabilities":    capabilities,
+		"bound_agent_id":  boundAgentID,
+		"bound_agent_cli": boundAgentCLI,
 		"desired_state":   desiredState,
 		"observed_state":  obsState,
 		"enabled":         enabled,
@@ -2023,7 +2031,17 @@ func (a *API) handleTrajectoriesPost(w http.ResponseWriter, r *http.Request) {
 
 // ==================== M10 工具中心与中台代批 API ====================
 
+func (a *API) handleToolRelayOnly(w http.ResponseWriter, r *http.Request) {
+	if a.relayTool(w, r) {
+		return
+	}
+	writeErr(w, http.StatusNotFound, "工具插件未连接，Hub 不保存工具正文")
+}
+
 func (a *API) handleToolsList(w http.ResponseWriter, r *http.Request) {
+	if a.relayTool(w, r) {
+		return
+	}
 	category := r.URL.Query().Get("category")
 	tools := a.toolCenter.ListTools(toolcenter.ToolCategory(category))
 	if tools == nil {
@@ -2036,6 +2054,9 @@ func (a *API) handleToolsList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleToolGet(w http.ResponseWriter, r *http.Request) {
+	if a.relayTool(w, r) {
+		return
+	}
 	toolID := r.PathValue("tool_id")
 	tool, err := a.toolCenter.GetTool(toolID)
 	if err != nil {
@@ -2046,6 +2067,9 @@ func (a *API) handleToolGet(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSkillCreate(w http.ResponseWriter, r *http.Request) {
+	if a.relayTool(w, r) {
+		return
+	}
 	var skill toolcenter.ToolDefinition
 	if err := json.NewDecoder(r.Body).Decode(&skill); err != nil {
 		writeErr(w, http.StatusBadRequest, "解析技能定义失败: "+err.Error())
@@ -2066,6 +2090,9 @@ func (a *API) handleSkillCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSkillUpdate(w http.ResponseWriter, r *http.Request) {
+	if a.relayTool(w, r) {
+		return
+	}
 	toolID := r.PathValue("tool_id")
 	var req struct {
 		Code         string `json:"code"`
@@ -2086,6 +2113,9 @@ func (a *API) handleSkillUpdate(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleSkillDelete(w http.ResponseWriter, r *http.Request) {
+	if a.relayTool(w, r) {
+		return
+	}
 	toolID := r.PathValue("tool_id")
 	if err := a.toolCenter.DeleteSkill(toolID); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -2098,6 +2128,9 @@ func (a *API) handleSkillDelete(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleGrantsList(w http.ResponseWriter, r *http.Request) {
+	if a.relayTool(w, r) {
+		return
+	}
 	botID := r.URL.Query().Get("bot_id")
 	grants := a.toolCenter.ListGrants(botID)
 	if grants == nil {
@@ -2110,6 +2143,9 @@ func (a *API) handleGrantsList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleGrantTool(w http.ResponseWriter, r *http.Request) {
+	if a.relayTool(w, r) {
+		return
+	}
 	var grant toolcenter.BotToolGrant
 	if err := json.NewDecoder(r.Body).Decode(&grant); err != nil {
 		writeErr(w, http.StatusBadRequest, "解析授权配置失败: "+err.Error())
@@ -2126,6 +2162,9 @@ func (a *API) handleGrantTool(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleRevokeGrant(w http.ResponseWriter, r *http.Request) {
+	if a.relayTool(w, r) {
+		return
+	}
 	var req struct {
 		BotID  string `json:"bot_id"`
 		ToolID string `json:"tool_id"`
@@ -2142,6 +2181,9 @@ func (a *API) handleRevokeGrant(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleToolExecute(w http.ResponseWriter, r *http.Request) {
+	if a.relayTool(w, r) {
+		return
+	}
 	toolID := r.PathValue("tool_id")
 	var req struct {
 		BotID  string                 `json:"bot_id"`

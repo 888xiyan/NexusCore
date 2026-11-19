@@ -9,11 +9,13 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -29,6 +31,9 @@ type server struct {
 func main() {
 	var (
 		port        = flag.Int("port", 7400, "ToolCenter HTTP 监听端口")
+		dataDir     = flag.String("data", "", "工具目录；设置后分类、正文与授权在进程重启后仍在")
+		sandboxCA   = flag.String("sandbox-ca", "", "搜索外联额外信任的 PEM 证书")
+		auditExtra  = flag.String("audit-extra", "", "搜索外联除 user_bot 外的接收者，逗号分隔")
 		showVersion = flag.Bool("version", false, "打印版本号")
 	)
 	flag.Parse()
@@ -38,7 +43,27 @@ func main() {
 		return
 	}
 
-	svc := toolcenter.NewToolCenterService()
+	var svc *toolcenter.ToolCenterService
+	if *dataDir == "" {
+		svc = toolcenter.NewToolCenterService()
+	} else {
+		opened, err := toolcenter.OpenToolCenterService(*dataDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[plugin_tool_center] 打开工具目录失败: %v\n", err)
+			os.Exit(1)
+		}
+		svc = opened
+		fmt.Printf("[plugin_tool_center] 工具目录 %s\n", *dataDir)
+	}
+	if *sandboxCA != "" {
+		if err := svc.SetSandboxCA(*sandboxCA); err != nil {
+			fmt.Fprintf(os.Stderr, "[plugin_tool_center] 加载沙箱 CA 失败: %v\n", err)
+			os.Exit(1)
+		}
+	}
+	if extra := strings.TrimSpace(*auditExtra); extra != "" {
+		svc.SetExtraAuditRecipients(strings.Split(extra, ","))
+	}
 	s := &server{
 		svc:       svc,
 		startTime: time.Now(),
@@ -51,9 +76,15 @@ func main() {
 	mux.HandleFunc("POST /api/skills", s.handleSkillCreate)
 	mux.HandleFunc("PUT /api/skills/{tool_id}", s.handleSkillUpdate)
 	mux.HandleFunc("DELETE /api/skills/{tool_id}", s.handleSkillDelete)
+	mux.HandleFunc("GET /api/skills/{tool_id}/revisions", s.handleSkillRevisions)
+	mux.HandleFunc("POST /api/mcp", s.handleMCPCreate)
+	mux.HandleFunc("PUT /api/mcp/{tool_id}", s.handleMCPUpdate)
+	mux.HandleFunc("PUT /api/tools/{tool_id}/named-bots", s.handleNamedBots)
 	mux.HandleFunc("GET /api/grants", s.handleGrantsList)
 	mux.HandleFunc("POST /api/grants", s.handleGrantTool)
 	mux.HandleFunc("POST /api/grants/revoke", s.handleRevokeGrant)
+	mux.HandleFunc("GET /api/traces", s.handleTraces)
+	mux.HandleFunc("GET /api/audit", s.handleAudit)
 	mux.HandleFunc("POST /api/tools/{tool_id}/execute", s.handleToolExecute)
 
 	addr := fmt.Sprintf(":%d", *port)
@@ -133,7 +164,7 @@ func (s *server) handleSkillCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.svc.CreateSkill(skill); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeServiceErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusCreated, map[string]any{
@@ -153,7 +184,7 @@ func (s *server) handleSkillUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.svc.UpdateSkill(toolID, req.Code, req.ConfigSchema); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeServiceErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "updated", "tool_id": toolID})
@@ -162,10 +193,74 @@ func (s *server) handleSkillUpdate(w http.ResponseWriter, r *http.Request) {
 func (s *server) handleSkillDelete(w http.ResponseWriter, r *http.Request) {
 	toolID := r.PathValue("tool_id")
 	if err := s.svc.DeleteSkill(toolID); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeServiceErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "deleted", "tool_id": toolID})
+}
+
+func (s *server) handleSkillRevisions(w http.ResponseWriter, r *http.Request) {
+	toolID := r.PathValue("tool_id")
+	revs := s.svc.ListRevisions(toolID)
+	if revs == nil {
+		revs = []toolcenter.SkillRevision{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"revisions": revs, "count": len(revs)})
+}
+
+func (s *server) handleMCPCreate(w http.ResponseWriter, r *http.Request) {
+	var tool toolcenter.ToolDefinition
+	if err := json.NewDecoder(r.Body).Decode(&tool); err != nil {
+		writeErr(w, http.StatusBadRequest, "解析 MCP 登记失败: "+err.Error())
+		return
+	}
+	if err := s.svc.CreateMCP(tool); err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"status": "created", "tool_id": tool.ToolID})
+}
+
+func (s *server) handleMCPUpdate(w http.ResponseWriter, r *http.Request) {
+	toolID := r.PathValue("tool_id")
+	var req struct {
+		EndpointRef string `json:"endpoint_ref"`
+		SecretRef   string `json:"secret_ref"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "解析 MCP 更新失败: "+err.Error())
+		return
+	}
+	if err := s.svc.UpdateMCP(toolID, req.EndpointRef, req.SecretRef); err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "updated", "tool_id": toolID})
+}
+
+func (s *server) handleNamedBots(w http.ResponseWriter, r *http.Request) {
+	toolID := r.PathValue("tool_id")
+	var req struct {
+		BotIDs []string `json:"bot_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "解析点名清单失败: "+err.Error())
+		return
+	}
+	if err := s.svc.SetNamedBots(toolID, req.BotIDs); err != nil {
+		writeServiceErr(w, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"status": "named", "tool_id": toolID, "bot_ids": req.BotIDs})
+}
+
+func (s *server) handleTraces(w http.ResponseWriter, r *http.Request) {
+	botID := r.URL.Query().Get("bot_id")
+	traces := s.svc.ListTraces(botID)
+	if traces == nil {
+		traces = []toolcenter.CallTrace{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"traces": traces, "count": len(traces)})
 }
 
 func (s *server) handleGrantsList(w http.ResponseWriter, r *http.Request) {
@@ -187,7 +282,7 @@ func (s *server) handleGrantTool(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := s.svc.GrantTool(grant); err != nil {
-		writeErr(w, http.StatusBadRequest, err.Error())
+		writeServiceErr(w, err)
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"status": "granted", "grant_id": grant.GrantID})
@@ -224,10 +319,23 @@ func (s *server) handleToolExecute(w http.ResponseWriter, r *http.Request) {
 		return fmt.Sprintf("执行工具 [%s] 成功，沙盒输出留痕", toolID), 0, nil
 	})
 	if err != nil {
-		writeJSON(w, http.StatusForbidden, res)
+		code := http.StatusForbidden
+		if !errors.Is(err, toolcenter.ErrToolAccessDenied) && !errors.Is(err, toolcenter.ErrNetworkDenied) && !errors.Is(err, toolcenter.ErrToolNotNamed) {
+			code = http.StatusBadGateway
+		}
+		writeJSON(w, code, res)
 		return
 	}
 	writeJSON(w, http.StatusOK, res)
+}
+
+func (s *server) handleAudit(w http.ResponseWriter, r *http.Request) {
+	to := r.URL.Query().Get("to")
+	notices := s.svc.ListAudit(to)
+	if notices == nil {
+		notices = []toolcenter.AuditNotice{}
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"notices": notices, "count": len(notices)})
 }
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
@@ -238,4 +346,15 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 
 func writeErr(w http.ResponseWriter, code int, msg string) {
 	writeJSON(w, code, map[string]string{"error": msg})
+}
+
+func writeServiceErr(w http.ResponseWriter, err error) {
+	switch {
+	case errors.Is(err, toolcenter.ErrToolNotFound):
+		writeErr(w, http.StatusNotFound, err.Error())
+	case errors.Is(err, toolcenter.ErrToolNotNamed), errors.Is(err, toolcenter.ErrToolAccessDenied):
+		writeErr(w, http.StatusForbidden, err.Error())
+	default:
+		writeErr(w, http.StatusBadRequest, err.Error())
+	}
 }

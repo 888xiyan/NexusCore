@@ -127,6 +127,10 @@ echo "$EXEC_RES" | grep -q '"exit_code":0' || fail "授权后执行失败: $EXEC
 echo "授权矩阵赋权执行全链路成功"
 
 step "步骤 8：验证受控沙盒网络外联审计告警 (sys.search.web)"
+# 互联网搜索默认强绑，先点名再授权
+curl -s -X PUT "$TOOL_CENTER_URL/api/tools/sys.search.web/named-bots" \
+  -H "Content-Type: application/json" \
+  -d '{"bot_ids":["search_bot"]}' >/dev/null
 # 先向 search_bot 授予 sys.search.web 权限
 curl -s -X POST "$TOOL_CENTER_URL/api/grants" \
   -H "Content-Type: application/json" \
@@ -135,8 +139,9 @@ curl -s -X POST "$TOOL_CENTER_URL/api/grants" \
 SEARCH_RES=$(curl -s -X POST "$TOOL_CENTER_URL/api/tools/sys.search.web/execute" \
   -H "Content-Type: application/json" \
   -d '{"bot_id":"search_bot","params":{"query":"NexusCore v0.2.0"}}')
-echo "$SEARCH_RES" | grep -q '"network_triggered":true' || fail "网络搜索工具未标记 network_triggered: $SEARCH_RES"
-echo "沙盒网络外联审计标记验证通过"
+echo "$SEARCH_RES" | grep -q '"exit_code":0' || fail "已授权搜索执行失败: $SEARCH_RES"
+echo "$SEARCH_RES" | grep -q '"network_triggered":false' || fail "纯文本检索不应外联: $SEARCH_RES"
+echo "纯文本检索保持离线；真实 DNS/HTTPS 由 smoke-m13 验收"
 
 step "步骤 9：启动 L2 独立插件商场服务 (plugin_marketplace :7600) 并探活"
 ./bin/plugins/plugin_marketplace -port "$MARKETPLACE_PORT" > "$RUN_DIR/marketplace.log" 2>&1 &

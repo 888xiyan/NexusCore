@@ -5,7 +5,7 @@ import { useBotsStore } from '../stores/bots'
 import ChatBubble from '../components/ChatBubble.vue'
 import MentionInput from '../components/MentionInput.vue'
 import { ChatDotRound, InfoFilled } from '@element-plus/icons-vue'
-import { identityLabel } from '../api/bots'
+import { identityLabels } from '../api/bots'
 
 const chatStore = useChatStore()
 const botsStore = useBotsStore()
@@ -82,7 +82,7 @@ const getStatusText = (status: string) => {
           <div class="chip-meta">
             <span class="chip-name">{{ b.display_name || b.bot_id }}</span>
             <span class="chip-status" :class="getBotStatus(b.bot_id)">
-              {{ identityLabel(b.identity) }}{{ identityLabel(b.identity) ? ' · ' : '' }}{{ getStatusText(getBotStatus(b.bot_id)) }}
+              {{ identityLabels(b.identity, b.identities) }}{{ identityLabels(b.identity, b.identities) ? ' · ' : '' }}{{ getStatusText(getBotStatus(b.bot_id)) }}
             </span>
           </div>
         </div>

@@ -15,6 +15,8 @@ interface ToolItem {
   network_requirement: string
   tier: string
   version: string
+  bound?: boolean
+  named_bots?: string[]
 }
 
 interface GrantItem {
@@ -177,7 +179,10 @@ const grantToolToBot = async (toolID: string) => {
         granted_by: 'user_bot',
       }),
     })
-    if (!res.ok) throw new Error('授权失败')
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.error || '授权失败')
+    }
     ElMessage.success(`已将 [${toolID}] 执行权限授予 ${selectedBot.value}`)
     await fetchGrants()
   } catch (err: any) {
@@ -198,6 +203,26 @@ const revokeGrant = async (toolID: string) => {
     if (!res.ok) throw new Error('吊销失败')
     ElMessage.success('已吊销该工具执行授权')
     await fetchGrants()
+  } catch (err: any) {
+    ElMessage.error(err.message)
+  }
+}
+
+const nameCurrentBot = async (tool: ToolItem) => {
+  const named = new Set(tool.named_bots || [])
+  named.add(selectedBot.value)
+  try {
+    const res = await fetch(`/v1/tools/named-bots/${encodeURIComponent(tool.tool_id)}`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ bot_ids: [...named] }),
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.error || '点名失败')
+    }
+    ElMessage.success(`已将 ${selectedBot.value} 点名到 ${tool.tool_id}`)
+    await fetchTools()
   } catch (err: any) {
     ElMessage.error(err.message)
   }
@@ -290,6 +315,12 @@ onMounted(() => {
               <el-tag v-else type="danger" size="small">任意网络</el-tag>
             </template>
           </el-table-column>
+          <el-table-column label="强绑" width="90">
+            <template #default="{ row }">
+              <el-tag v-if="row.bound" type="danger" size="small">强绑</el-tag>
+              <span v-else class="text-muted">否</span>
+            </template>
+          </el-table-column>
           <el-table-column label="风险等级" width="100">
             <template #default="{ row }">
               <el-tag v-if="row.tier === 'tier1'" type="success" size="small">Tier 1 低危</el-tag>
@@ -366,7 +397,9 @@ onMounted(() => {
                 <div class="chip-info">
                   <strong>{{ t.name }}</strong>
                   <small>{{ t.tool_id }}</small>
+                  <el-tag v-if="t.bound" size="small" type="danger">强绑</el-tag>
                 </div>
+                <el-button v-if="t.bound" size="small" @click="nameCurrentBot(t)">点名</el-button>
                 <el-button size="small" type="primary" @click="grantToolToBot(t.tool_id)">
                   授予权限
                 </el-button>

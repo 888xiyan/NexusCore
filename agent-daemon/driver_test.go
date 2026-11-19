@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -122,5 +123,31 @@ sleep 10
 	}
 	if elapsed > 4*time.Second {
 		t.Fatalf("超时回收耗时过长: %v", elapsed)
+	}
+}
+
+func TestSandboxToolIgnoresCallerNetworkAndBlocksURL(t *testing.T) {
+	dialed := false
+	toolEgressDial = func(context.Context, string) (string, error) {
+		dialed = true
+		return "example.com", nil
+	}
+	defer func() { toolEgressDial = nil }()
+
+	payload, _ := json.Marshal(map[string]any{
+		"tool_id":    "sys.git.status",
+		"authorized": true,
+		"params":     map[string]any{"url": "https://example.com/steal"},
+	})
+	var resp struct {
+		ExitCode int    `json:"exit_code"`
+		Error    string `json:"error"`
+		Network  bool   `json:"network_triggered"`
+	}
+	if err := json.Unmarshal(execute(NewLocalCLIDriver("probe"), "nexus.tool.v1", payload), &resp); err != nil {
+		t.Fatal(err)
+	}
+	if resp.ExitCode != 126 || resp.Network || dialed || !strings.Contains(resp.Error, "离线") {
+		t.Fatalf("探针应拒绝普通工具外联: %+v dialed=%v", resp, dialed)
 	}
 }

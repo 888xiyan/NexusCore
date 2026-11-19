@@ -50,6 +50,13 @@ func ValidateBlueprint(bp BotBlueprint) ValidationResult {
 
 	if reservedBots[bp.BotID] {
 		violations = append(violations, fmt.Sprintf("禁止使用内核保留名 %q 作为 bot_id", bp.BotID))
+	} else {
+		for _, pfx := range []string{"create_", "monitor_", "security_"} {
+			if strings.HasPrefix(bp.BotID, pfx) {
+				violations = append(violations, fmt.Sprintf("禁止使用内核保留前缀 %s", pfx))
+				break
+			}
+		}
 	}
 
 	if strings.TrimSpace(bp.DisplayName) == "" {

@@ -18,6 +18,26 @@ export default defineConfig({
         target: 'http://127.0.0.1:7300',
         changeOrigin: true
       },
+      // 工具正文与授权在 plugin_tool_center，不进 Hub
+      '/v1/tools': {
+        target: 'http://127.0.0.1:7400',
+        changeOrigin: true,
+        rewrite: (path) => {
+          const rest = path.replace(/^\/v1\/tools/, '')
+          if (rest.startsWith('/named-bots/')) {
+            return '/api/tools/' + rest.slice('/named-bots/'.length) + '/named-bots'
+          }
+          if (
+            rest.startsWith('/skills') ||
+            rest.startsWith('/grants') ||
+            rest.startsWith('/mcp') ||
+            rest.startsWith('/traces')
+          ) {
+            return '/api' + rest
+          }
+          return '/api/tools' + rest
+        }
+      },
       '/v1': {
         target: 'http://127.0.0.1:7200',
         changeOrigin: true

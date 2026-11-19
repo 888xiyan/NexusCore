@@ -2,12 +2,148 @@
 import { ref, computed, watch } from 'vue'
 import { useBotsStore } from '../stores/bots'
 import { ElMessage } from 'element-plus'
-import { Cpu, Refresh, WarningFilled, Document, User } from '@element-plus/icons-vue'
-import { identityLabel } from '../api/bots'
+import { Cpu, Refresh, Document, User, Tools } from '@element-plus/icons-vue'
+import { identityLabel, botsApi, type AgentAsset } from '../api/bots'
+
+interface ToolChoice {
+  tool_id: string
+  name: string
+  category: string
+  bound?: boolean
+  named_bots?: string[]
+}
 
 const botsStore = useBotsStore()
 
 const editableMemory = ref<string>('')
+const toolChoices = ref<ToolChoice[]>([])
+const grantedToolIDs = ref<string[]>([])
+const selectedToolIDs = ref<string[]>([])
+const savingTools = ref(false)
+const agents = ref<AgentAsset[]>([])
+const selectedAgentID = ref('')
+const savingAgent = ref(false)
+
+const loadToolGrants = async (botID: string) => {
+  try {
+    const [toolsRes, grantsRes] = await Promise.all([
+      fetch('/v1/tools'),
+      fetch(`/v1/tools/grants?bot_id=${encodeURIComponent(botID)}`),
+    ])
+    if (toolsRes.ok) {
+      const data = await toolsRes.json()
+      toolChoices.value = data.tools || []
+    }
+    if (grantsRes.ok) {
+      const data = await grantsRes.json()
+      const ids = (data.grants || []).map((item: { tool_id: string }) => item.tool_id)
+      grantedToolIDs.value = ids
+      selectedToolIDs.value = [...ids]
+    }
+  } catch {
+    toolChoices.value = []
+  }
+}
+
+const loadAgents = async () => {
+  try {
+    agents.value = await botsApi.listAgents()
+  } catch {
+    agents.value = []
+  }
+}
+
+watch(
+  () => botsStore.selectedBotId,
+  (botID) => {
+    if (botID) {
+      loadToolGrants(botID)
+      loadAgents()
+    }
+  },
+  { immediate: true }
+)
+
+watch(
+  () => botsStore.selectedBotDetail?.bound_agent_id,
+  (agentID) => {
+    selectedAgentID.value = agentID || ''
+  },
+  { immediate: true }
+)
+
+const saveAgentBinding = async () => {
+  const botID = botsStore.selectedBotId
+  if (!botID) return
+  savingAgent.value = true
+  try {
+    const res = await fetch(`/v1/bots/${encodeURIComponent(botID)}/binding`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ agent_id: selectedAgentID.value }),
+    })
+    if (!res.ok) {
+      const data = await res.json().catch(() => ({}))
+      throw new Error(data.error || '保存探针绑定失败')
+    }
+    ElMessage.success('探针绑定已保存，重启 Bot 后生效')
+  } catch (err: any) {
+    ElMessage.error(err?.message || '保存探针绑定失败')
+  } finally {
+    savingAgent.value = false
+  }
+}
+
+const toolDisabled = (tool: ToolChoice) => {
+  const botID = botsStore.selectedBotId
+  if (!tool.bound || !botID) return false
+  return !(tool.named_bots || []).includes(botID)
+}
+
+const saveToolGrants = async () => {
+  const botID = botsStore.selectedBotId
+  if (!botID) return
+  savingTools.value = true
+  try {
+    const previous = new Set(grantedToolIDs.value)
+    const next = new Set(selectedToolIDs.value)
+    for (const toolID of next) {
+      if (previous.has(toolID)) continue
+      const res = await fetch('/v1/tools/grants', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          bot_id: botID,
+          tool_id: toolID,
+          permission: 'execute',
+          granted_by: 'user_bot',
+        }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `授权 ${toolID} 失败`)
+      }
+    }
+    for (const toolID of previous) {
+      if (next.has(toolID)) continue
+      const res = await fetch('/v1/tools/grants/revoke', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ bot_id: botID, tool_id: toolID }),
+      })
+      if (!res.ok) {
+        const data = await res.json().catch(() => ({}))
+        throw new Error(data.error || `吊销 ${toolID} 失败`)
+      }
+    }
+    grantedToolIDs.value = [...selectedToolIDs.value]
+    ElMessage.success('工具授权已写入工具插件')
+  } catch (err: any) {
+    ElMessage.error(err?.message || '保存工具授权失败')
+  } finally {
+    savingTools.value = false
+  }
+}
 
 // Initialize editable memory when selected memory changes
 watch(
@@ -71,7 +207,12 @@ const handleSaveAndRestart = async () => {
             </div>
             <div class="info-row">
               <span class="info-label">身份:</span>
-              <el-tag size="small" type="primary">{{ identityLabel(botsStore.selectedBotDetail.identity) || '未标注' }}</el-tag>
+              <el-tag
+                v-for="id in (botsStore.selectedBotDetail.identities?.length ? botsStore.selectedBotDetail.identities : [botsStore.selectedBotDetail.identity || ''])"
+                :key="id"
+                size="small"
+                type="primary"
+              >{{ identityLabel(id) || '未标注' }}</el-tag>
             </div>
             <div class="info-row">
               <span class="info-label">角色定位:</span>
@@ -110,6 +251,29 @@ const handleSaveAndRestart = async () => {
               </el-tag>
             </div>
           </div>
+        </div>
+
+        <div class="section-card">
+          <div class="section-header">
+            <el-icon><Cpu /></el-icon>
+            <span>绑定探针</span>
+          </div>
+          <p class="constraint-note">下拉数据来自 Agent 搜寻结果。未选择探针的 Bot 不能派发 CLI。</p>
+          <el-select
+            v-model="selectedAgentID"
+            clearable
+            filterable
+            placeholder="选择已搜寻到的探针"
+            style="width: 100%"
+          >
+            <el-option
+              v-for="ag in agents"
+              :key="ag.agent_id"
+              :label="ag.display_name || ag.agent_id"
+              :value="ag.agent_id"
+            />
+          </el-select>
+          <el-button size="small" :loading="savingAgent" @click="saveAgentBinding">保存探针绑定</el-button>
         </div>
 
         <!-- System Prompt Reference -->
@@ -164,6 +328,27 @@ const handleSaveAndRestart = async () => {
               rows="12"
             ></textarea>
           </div>
+        </div>
+
+        <div class="section-card">
+          <div class="section-header">
+            <el-icon><Tools /></el-icon>
+            <span>已授权工具</span>
+          </div>
+          <p class="constraint-note">授权存在工具插件。强绑工具只有点名清单中的 Bot 可以勾选。</p>
+          <el-checkbox-group v-model="selectedToolIDs" class="tool-grant-list">
+            <el-checkbox
+              v-for="tool in toolChoices"
+              :key="tool.tool_id"
+              :label="tool.tool_id"
+              :disabled="toolDisabled(tool)"
+            >
+              {{ tool.name }}
+              <span class="tool-id">{{ tool.tool_id }}</span>
+              <el-tag v-if="tool.bound" size="small" type="danger">强绑</el-tag>
+            </el-checkbox>
+          </el-checkbox-group>
+          <el-button size="small" :loading="savingTools" @click="saveToolGrants">保存工具授权</el-button>
         </div>
       </div>
     </div>
@@ -298,6 +483,20 @@ const handleSaveAndRestart = async () => {
 
 .memory-textarea:focus {
   background: #ffffff;
+}
+
+.tool-grant-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.tool-id {
+  margin-left: 6px;
+  color: #909399;
+  font-family: monospace;
+  font-size: 12px;
 }
 
 .drawer-footer {

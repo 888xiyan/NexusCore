@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] - 2026-11-19 · M13 沙箱、搜索通知与探针绑定
+
+### 默认离线与搜索外联
+
+- 工具执行默认没有出站网络。参数里的 URL 不能替普通工具打开外联。
+- 已授权的 `sys.search.web` 才对 HTTPS 地址做 DNS 解析并发起请求。完成后向 `user_bot` 投递审计，写明 Bot、工具和域名。`-audit-extra` 可追加接收者。
+- 执行轨迹留在工具插件目录：是否联网、入参摘要、退出码、耗时、蒸馏结果。原始大输出不进入 Bot 上下文。Hub 不新建轨迹表。
+- 未保存探针绑定的 Bot 在派发 CLI 前被拒绝。Bot 编辑页的探针下拉来自搜寻结果。
+- 回归：`make smoke-m13`。
+
+## [Unreleased] - 2026-11-19 · M12 工具持久化与授权
+
+### 工具插件自有存储
+
+- `plugin_tool_center -data` 将系统工具、Skill 正文与版本、MCP 的 `endpoint_ref` / `secret_ref`、Bot–工具授权和未授权轨迹写入插件目录 `catalog.json`。进程重启后仍在。
+- 系统工具不可修改、不可删除。互联网搜索 `sys.search.web` 默认强绑，未点名的 Bot 不能被授予。
+- MCP 拒绝明文密钥，只接受 `secret://` 引用。
+- Hub 在设置 `-tool-center-url` 时转发工具读写，不保存 Skill 正文。未新增 `kernel_bot_tool_grants` 或 `kernel_tool_trajectories`。
+- Bot 编辑页可勾选已授权工具。`MEMORY.md` 超过 200 行仍拒绝保存。
+- 回归：`make smoke-m12`。
+
+v0.1.0 条目里写过的内核轨迹表与配置中心授权表没有落地，后续也不再采用。
+
 ## [v0.1.0] - 2026-11-16 · 旗舰正式发行版 (Flagship Release)
 
 NexusCore 是以微内核为基础的个人智能工作台系统，首创**“脑手分离（Brain-Hand Separation）”**与**“原生单体记忆（Native Monolithic Memory）”**架构，提供从微内核底座、简单 Agent 调度、群聊协同到可视化工作台的端到端完整闭环。

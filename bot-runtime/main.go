@@ -47,6 +47,7 @@ func main() {
 		configVersion = flag.Int64("config-version", 0, "启动时加载的配置版本")
 		agentID       = flag.String("agent-id", "loopback_agent", "echo 工具的目标 Agent")
 		agentCLI      = flag.String("agent-cli", "", "默认调度的本地 CLI 名称（如 codex, pi, claude, nexus-mock-agent）")
+		agentBound    = flag.Bool("agent-bound", false, "清单里保存了探针绑定时才允许派发 CLI")
 		pluginID      = flag.String("plugin-id", "", "所属插件 ID（若为 owner bot 则 exec 插件进程）")
 		pluginBinary  = flag.String("plugin-binary", "", "插件进程独立二进制路径")
 		pluginDigest  = flag.String("plugin-digest", "", "插件进程制品摘要")
@@ -85,7 +86,7 @@ func main() {
 
 	b := &bot{
 		id: *botID, cred: cred, client: client, httpBase: "http://" + *hubHTTP,
-		transportAddr: *hubTransport, agentID: *agentID, agentCLI: *agentCLI, configVersion: *configVersion,
+		transportAddr: *hubTransport, agentID: *agentID, agentCLI: *agentCLI, agentBound: *agentBound, configVersion: *configVersion,
 		idleTTL:  time.Duration(*idleTTL) * time.Second,
 		pluginID: *pluginID, pluginBinary: *pluginBinary, pluginDigest: *pluginDigest,
 		memMgr: memMgr, injectedMemory: injectedMem,
@@ -127,6 +128,7 @@ type bot struct {
 	transportAddr string
 	agentID       string
 	agentCLI      string
+	agentBound    bool
 	configVersion int64
 	idleTTL       time.Duration
 
@@ -514,6 +516,9 @@ func (b *bot) handleTask(ctx context.Context, task *pb.TaskAssignment) error {
 		execErr    error
 	)
 	if b.agentCLI != "" || (b.agentID != "loopback_agent" && b.agentID != "") {
+		if err := CLIDispatchAllowed(b.agentBound, b.agentID); err != nil {
+			return err
+		}
 		toolOutput, execErr = b.dispatchAgentCLI(taskCtx, task.JobId, text)
 		if execErr != nil {
 			return execErr

@@ -90,3 +90,17 @@ func isReservedBot(botID string) bool {
 		return false
 	}
 }
+
+// RejectedBotID 拒绝四个保留名，以及 create_ / monitor_ / security_ 前缀。
+// user_ 前缀留给用户 Bot，不在这里拒绝。空字符串表示可以注册。
+func RejectedBotID(botID string) string {
+	if isReservedBot(botID) {
+		return "禁止使用内核保留名"
+	}
+	for _, pfx := range []string{"create_", "monitor_", "security_"} {
+		if strings.HasPrefix(botID, pfx) {
+			return "禁止使用内核保留前缀 " + pfx
+		}
+	}
+	return ""
+}

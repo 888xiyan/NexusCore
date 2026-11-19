@@ -269,6 +269,7 @@ func usage() {
 【M2: 插件运营与进程控制】
   plugin install <manifest.json>
   plugin list
+  plugin lifecycle <plugin_id>
   plugin upgrade <manifest.json>
   plugin disable <plugin_id>
   plugin uninstall <plugin_id> [--confirm] [--keep]
@@ -695,7 +696,7 @@ func handleCreateBot(ctx context.Context, httpBase, cred string, args []string) 
 
 func handlePlugin(ctx context.Context, httpBase, cred string, args []string) error {
 	if len(args) == 0 {
-		return errors.New("缺少 plugin 子命令 (install, list, upgrade, disable, uninstall, ps, stop, start, kill)")
+		return errors.New("缺少 plugin 子命令 (install, list, lifecycle, upgrade, disable, uninstall, ps, stop, start, kill)")
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -713,6 +714,12 @@ func handlePlugin(ctx context.Context, httpBase, cred string, args []string) err
 
 	case "list":
 		return doGet(ctx, httpBase+"/v1/plugins", cred)
+
+	case "lifecycle":
+		if len(rest) == 0 {
+			return errors.New("用法: plugin lifecycle <plugin_id>")
+		}
+		return doGet(ctx, httpBase+"/v1/plugins/"+rest[0]+"/lifecycle", cred)
 
 	case "upgrade":
 		if len(rest) == 0 {

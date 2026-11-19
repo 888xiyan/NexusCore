@@ -30,6 +30,11 @@ export function identityLabel(identity?: string): string {
   }
 }
 
+export function identityLabels(identity?: string, identities?: string[]): string {
+  const list = identities && identities.length > 0 ? identities : identity ? [identity] : []
+  return list.map((id) => identityLabel(id)).filter(Boolean).join(' / ')
+}
+
 export interface BotListResponse {
   bots: BotInfo[]
 }
@@ -51,6 +56,8 @@ export interface BotDetail {
   prompt_ref?: string
   model?: string
   config_version?: number
+  bound_agent_id?: string
+  bound_agent_cli?: string
 }
 
 export interface BotMemory {

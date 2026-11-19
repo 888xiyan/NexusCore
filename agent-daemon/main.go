@@ -159,6 +159,8 @@ func execute(driver *LocalCLIDriver, protocol string, payload []byte) []byte {
 		return out
 	case "nexus.cli.v1":
 		return handleCLIProtocol(driver, payload)
+	case "nexus.tool.v1":
+		return handleSandboxTool(payload)
 	default:
 		out, _ := json.Marshal(map[string]any{"error": "unsupported_protocol", "protocol_id": protocol})
 		return out

@@ -43,6 +43,7 @@ func main() {
 		insecureLocal = flag.Bool("insecure-local", true, "MVP 仅回环 trust（生产需 mTLS）")
 		credFile      = flag.String("user-credential-file", "data/user_bot.cred", "user_bot 凭证输出文件")
 		botBinary     = flag.String("bot-binary", "bin/bot-runtime", "M1 夹具 Bot 二进制路径")
+		toolCenterURL = flag.String("tool-center-url", "", "工具插件地址；设置后工具读写转发到插件，Hub 不保存正文")
 		reconcile     = flag.Duration("reconcile-interval", 2*time.Second, "supervisor reconcile 周期")
 		wakeupPoll    = flag.Duration("wakeup-poll", 5*time.Second, "队列兜底轮询间隔（通知丢失不影响正确性）")
 	)
@@ -61,7 +62,7 @@ func main() {
 
 	if err := run(ctx, options{
 		httpAddr: *httpAddr, grpcAddr: *grpcAddr, transportAddr: *transportAddr,
-		credFile: *credFile, botBinary: *botBinary, reconcile: *reconcile, wakeupPoll: *wakeupPoll,
+		credFile: *credFile, botBinary: *botBinary, toolCenterURL: *toolCenterURL, reconcile: *reconcile, wakeupPoll: *wakeupPoll,
 	}); err != nil && ctx.Err() == nil {
 		fmt.Fprintln(os.Stderr, "hub 退出:", err)
 		os.Exit(1)
@@ -74,6 +75,7 @@ type options struct {
 	transportAddr string
 	credFile      string
 	botBinary     string
+	toolCenterURL string
 	reconcile     time.Duration
 	wakeupPoll    time.Duration
 }
@@ -133,6 +135,9 @@ func run(ctx context.Context, opt options) error {
 
 	pm := plugin.NewManager(st, cfg, sup, reg)
 	api := httpapi.New(st, reg, ing, sched, cfg, disp, router)
+	if opt.toolCenterURL != "" {
+		api.SetToolCenterUpstream(opt.toolCenterURL)
+	}
 	api.SetPluginManager(pm)
 	api.SetSupervisor(sup)
 	api.FixtureBinder = func(ctx context.Context) error { return bindFixture(ctx, st, opt.botBinary) }

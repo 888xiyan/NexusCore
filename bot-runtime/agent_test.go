@@ -263,6 +263,7 @@ func TestCLIAgentExecutionAndDistillation(t *testing.T) {
 		transportAddr: ln.Addr().String(),
 		agentID:       "local_probe",
 		agentCLI:      "codex",
+		agentBound:    true,
 		memMgr:        memMgr,
 		leases:        make(map[string]string),
 	}

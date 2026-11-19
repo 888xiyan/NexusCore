@@ -188,6 +188,91 @@ func TestInstallRejectsDepth(t *testing.T) {
 	if _, ok := mgr.memPlugins["plugin_layer_three"]; ok {
 		t.Fatal("深度超限不应留下已安装清单")
 	}
+	if recs[0].Digest == "" {
+		t.Fatal("失败留底应带清单摘要")
+	}
+}
+
+func TestRejectedBotIDPrefix(t *testing.T) {
+	raw := []byte(`{
+		"plugin_id":"plugin_prefix_bot","name":"Prefix","version":"1.0.0","plugin_type":"workspace","plugin_category":"foundation",
+		"bot_templates":[{"bot_id":"create_helper_bot","display_name":"Nope","activation_mode":"lazy"}]
+	}`)
+	mgr := NewManager(nil, nil, nil, nil)
+	if _, _, err := mgr.Install(context.Background(), config.BotActor(config.UserBot), raw); err == nil {
+		t.Fatal("create_ 前缀应被拒绝")
+	}
+	recs, err := mgr.ListLifecycle(context.Background(), "plugin_prefix_bot")
+	if err != nil || len(recs) != 1 || recs[0].Result != "rejected" || recs[0].Digest == "" {
+		t.Fatalf("前缀拒绝留底不符: %+v err=%v", recs, err)
+	}
+}
+
+func TestUpgradeDisableUninstallLifecycle(t *testing.T) {
+	mgr := NewManager(nil, nil, nil, nil)
+	ctx := context.Background()
+	actor := config.BotActor(config.UserBot)
+	raw := []byte(`{
+		"plugin_id":"plugin_m11_biz","name":"Biz","version":"1.0.0","plugin_type":"workspace","plugin_category":"business",
+		"bot_templates":[
+			{"bot_id":"m11_owner_bot","display_name":"Owner","activation_mode":"lazy"},
+			{"bot_id":"m11_nl_bot","display_name":"NL","activation_mode":"lazy"}
+		]
+	}`)
+	if _, _, err := mgr.Install(ctx, actor, raw); err != nil {
+		t.Fatal(err)
+	}
+	up := []byte(`{
+		"plugin_id":"plugin_m11_biz","name":"Biz","version":"1.1.0","plugin_type":"workspace","plugin_category":"business",
+		"bot_templates":[
+			{"bot_id":"m11_owner_bot","display_name":"Owner","activation_mode":"lazy"},
+			{"bot_id":"m11_nl_bot","display_name":"NL","activation_mode":"lazy"}
+		]
+	}`)
+	if _, _, err := mgr.Upgrade(ctx, actor, up); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Disable(ctx, actor, "plugin_missing"); err == nil {
+		t.Fatal("禁用不存在的插件应失败")
+	}
+	if err := mgr.Disable(ctx, actor, "plugin_m11_biz"); err != nil {
+		t.Fatal(err)
+	}
+	if err := mgr.Uninstall(ctx, actor, "plugin_m11_biz", true, false); err != nil {
+		t.Fatal(err)
+	}
+	recs, err := mgr.ListLifecycle(ctx, "plugin_m11_biz")
+	if err != nil || len(recs) != 4 {
+		t.Fatalf("生命周期应有安装、升级、禁用、卸载四条: %+v err=%v", recs, err)
+	}
+	want := []string{"install", "upgrade", "disable", "uninstall"}
+	for i, action := range want {
+		if recs[i].Action != action || recs[i].Result != "ok" || recs[i].Actor != config.UserBot {
+			t.Fatalf("第 %d 条留底不符: %+v", i, recs[i])
+		}
+	}
+	miss, err := mgr.ListLifecycle(ctx, "plugin_missing")
+	if err != nil || len(miss) != 1 || miss[0].Result != "rejected" {
+		t.Fatalf("缺失插件的禁用应留底: %+v err=%v", miss, err)
+	}
+}
+
+func TestThemeSkipsProcessSupervision(t *testing.T) {
+	mgr := NewManager(nil, nil, nil, nil)
+	ctx := context.Background()
+	theme := []byte(`{"plugin_id":"plugin_theme_day","name":"Day","version":"1.0.0","plugin_type":"workspace","plugin_category":"theme"}`)
+	if _, _, err := mgr.Install(ctx, config.BotActor(config.UserBot), theme); err != nil {
+		t.Fatal(err)
+	}
+	err := mgr.ReportProcess(ctx, config.BotActor("theme_bot"), ProcessReport{
+		PluginID: "plugin_theme_day", OwnerBotID: "theme_bot", PID: 1, State: "stopped",
+	})
+	if err == nil {
+		t.Fatal("theme 不应进入进程监管")
+	}
+	if _, ok := mgr.memProcesses["plugin_theme_day"]; ok {
+		t.Fatal("theme 不应留下进程登记")
+	}
 }
 
 func ifaceDoc(pluginID, interfaceID string) *PluginInterfacesDoc {

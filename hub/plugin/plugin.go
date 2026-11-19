@@ -238,13 +238,6 @@ func ValidateManifest(m *Manifest) error {
 		return err
 	}
 
-	reservedBots := map[string]bool{
-		config.UserBot:     true,
-		config.CreateBot:   true,
-		config.MonitorBot:  true,
-		config.SecurityBot: true,
-	}
-
 	if m.Binary != "" {
 		digest, err := hex.DecodeString(m.BinaryDigest)
 		if err != nil || len(digest) != sha256.Size || strings.ToLower(m.BinaryDigest) != m.BinaryDigest {
@@ -260,8 +253,8 @@ func ValidateManifest(m *Manifest) error {
 		if !botIDPattern.MatchString(bt.BotID) {
 			return fmt.Errorf("%w: bot_id %q 不符合规范 ^[a-z0-9_]{5,64}$", ErrInvalidManifest, bt.BotID)
 		}
-		if reservedBots[bt.BotID] {
-			return fmt.Errorf("%w: bot_id %q 命中内核保留名", ErrInvalidManifest, bt.BotID)
+		if reason := RejectedBotID(bt.BotID); reason != "" {
+			return fmt.Errorf("%w: bot_id %q %s", ErrInvalidManifest, bt.BotID, reason)
 		}
 		// 插件侧声明的 bot 不得使用 user_ 前缀（user_ 前缀仅限用户手动建的 bot）
 		if strings.HasPrefix(bt.BotID, "user_") {
@@ -298,6 +291,7 @@ func ValidateManifest(m *Manifest) error {
 func (m *Manager) Install(ctx context.Context, actor config.Actor, raw []byte) (*Manifest, int64, error) {
 	pluginID := peekPluginID(raw)
 	base := LifecycleRecord{PluginID: pluginID, Action: "install", Actor: actor.ID}
+	attachDigest(&base, raw)
 	if err := requireRole(actor, config.UserBot); err != nil {
 		return nil, 0, m.failLifecycle(ctx, base, err)
 	}
@@ -701,6 +695,12 @@ func (m *Manager) Disable(ctx context.Context, actor config.Actor, pluginID stri
 	if m.st == nil {
 		m.lifecycleMu.Lock()
 		defer m.lifecycleMu.Unlock()
+		if !m.knownPluginLocked(pluginID) {
+			base.Result = "rejected"
+			base.Reason = ErrPluginNotFound.Error()
+			m.appendLifecycle(base)
+			return fmt.Errorf("%w: %s", ErrPluginNotFound, pluginID)
+		}
 		m.memStatuses[pluginID] = "disabled"
 		base.Result = "ok"
 		m.appendLifecycle(base)
@@ -713,7 +713,7 @@ func (m *Manager) Disable(ctx context.Context, actor config.Actor, pluginID stri
 		   SET desired_state='stop', updated_at=now()
 		 WHERE bot_id IN (SELECT bot_id FROM bot_manifest WHERE parent_plugin=$1)`, pluginID)
 	if err != nil {
-		return fmt.Errorf("下线 Bot 进程: %w", err)
+		return m.failLifecycle(ctx, base, fmt.Errorf("下线 Bot 进程: %w", err))
 	}
 
 	tag, err := m.st.Pool().Exec(ctx, `
@@ -752,6 +752,12 @@ func (m *Manager) Uninstall(ctx context.Context, actor config.Actor, pluginID st
 	if m.st == nil {
 		m.lifecycleMu.Lock()
 		defer m.lifecycleMu.Unlock()
+		if !m.knownPluginLocked(pluginID) {
+			base.Result = "rejected"
+			base.Reason = ErrPluginNotFound.Error()
+			m.appendLifecycle(base)
+			return fmt.Errorf("%w: %s", ErrPluginNotFound, pluginID)
+		}
 		m.memStatuses[pluginID] = "uninstalled"
 		if confirm {
 			delete(m.memPlugins, pluginID)
@@ -803,6 +809,7 @@ func (m *Manager) Uninstall(ctx context.Context, actor config.Actor, pluginID st
 func (m *Manager) Upgrade(ctx context.Context, actor config.Actor, raw []byte) (*Manifest, int64, error) {
 	pluginID := peekPluginID(raw)
 	base := LifecycleRecord{PluginID: pluginID, Action: "upgrade", Actor: actor.ID}
+	attachDigest(&base, raw)
 	if err := requireRole(actor, config.UserBot); err != nil {
 		return nil, 0, m.failLifecycle(ctx, base, err)
 	}
@@ -866,6 +873,13 @@ func (m *Manager) ReportProcess(ctx context.Context, actor config.Actor, rep Pro
 	if rep.PluginID == "" || rep.OwnerBotID == "" || rep.PID <= 0 {
 		return fmt.Errorf("非法进程上报参数: plugin_id=%s, owner=%s, pid=%d", rep.PluginID, rep.OwnerBotID, rep.PID)
 	}
+	cat, err := m.pluginCategory(ctx, rep.PluginID)
+	if err != nil {
+		return err
+	}
+	if cat == CategoryTheme || cat == CategoryBotPack {
+		return fmt.Errorf("%w: %s", errCategoryNoProcess, rep.PluginID)
+	}
 
 	// 存活校验：防 PID 复用
 	if rep.State == "running" && rep.PIDStartTime > 0 {
@@ -911,7 +925,7 @@ func (m *Manager) ReportProcess(ctx context.Context, actor config.Actor, rep Pro
 		ownerInstanceID = fmt.Sprintf("%d", rep.OwnerPID)
 	}
 
-	_, err := m.st.Pool().Exec(ctx, `
+	_, err = m.st.Pool().Exec(ctx, `
 		INSERT INTO kernel_plugin_processes (
 			process_id, plugin_id, owner_bot_id, owner_instance_id,
 			pid, pgid, pid_start_time, binary_digest, config_version,

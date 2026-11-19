@@ -80,6 +80,51 @@ func (m *Manager) persistLifecycle(ctx context.Context, tx pgx.Tx, rec Lifecycle
 	return m.st.WithKernelRuntimeTx(ctx, write)
 }
 
+func attachDigest(rec *LifecycleRecord, raw []byte) {
+	if rec == nil || rec.Digest != "" || len(raw) == 0 {
+		return
+	}
+	if sum, err := manifestChecksum(raw); err == nil {
+		rec.Digest = sum
+		return
+	}
+	sum := sha256.Sum256(raw)
+	rec.Digest = hex.EncodeToString(sum[:])
+}
+
+func (m *Manager) knownPluginLocked(pluginID string) bool {
+	if _, ok := m.memPlugins[pluginID]; ok {
+		return true
+	}
+	_, ok := m.memStatuses[pluginID]
+	return ok
+}
+
+func (m *Manager) pluginCategory(ctx context.Context, pluginID string) (string, error) {
+	if m.st == nil {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		if mf := m.memPlugins[pluginID]; mf != nil {
+			return mf.PluginCategory, nil
+		}
+		return "", nil
+	}
+	var raw []byte
+	err := m.st.Pool().QueryRow(ctx, `
+		SELECT manifest_json FROM kernel_plugins WHERE plugin_id=$1`, pluginID).Scan(&raw)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", nil
+		}
+		return "", fmt.Errorf("读取插件分类: %w", err)
+	}
+	var mf Manifest
+	if err := json.Unmarshal(raw, &mf); err != nil {
+		return "", nil
+	}
+	return mf.PluginCategory, nil
+}
+
 func normalizeLifecycle(rec *LifecycleRecord) error {
 	switch rec.Action {
 	case "install", "upgrade", "disable", "uninstall":
