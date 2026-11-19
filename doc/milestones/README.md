@@ -2,7 +2,7 @@
 
 M4 起的实现专篇集中在本目录。M0–M3 的底座契约仍在 `doc/内核mvp/`、`doc/ConfigCenter/`、`doc/BotMvp/`、`doc/PluginMvp/`、`doc/MemoryPlugin/`。排期与验收记录在 [开发规划](../开发规划.md)。
 
-M11–M17 不单独立项。范围在开发规划，行为以 [系统Update-需求规格.md](系统Update-需求规格.md) 为准。进度（2026-11-19）：M11 已合入 `7624be4`；M12 已验收（`make smoke-m12`）；M13 已验收（`make smoke-m13`）；M14–M17 未开工；M18/M19 规格定稿、待实现。
+M11–M17 不单独立项。范围在开发规划，行为以 [系统Update-需求规格.md](系统Update-需求规格.md) 为准。进度（2026-11-19）：M11 已合入 `7624be4`；M12 已验收（`make smoke-m12`）；M13 已验收（`make smoke-m13`）；M14 已验收（`make smoke-m14`）；M15–M17 未开工；M18/M19 规格定稿、待实现。
 
 原先散落在 `doc/` 根目录的 `M*.md` 已收入此处。M8 的两篇（基础模块、依赖治理）合并为一篇。系统 Update 是 M9 / M10 的产品规范，随里程碑一起归档。
 

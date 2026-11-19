@@ -19,16 +19,19 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/888xiyan/NexusCore/internal/modules/marketplace"
 	"github.com/888xiyan/NexusCore/internal/version"
 )
 
 type server struct {
 	startTime time.Time
+	svc       *marketplace.Service
 }
 
 func main() {
 	var (
 		port        = flag.Int("port", 7600, "Marketplace HTTP 监听端口")
+		dataDir     = flag.String("data", "", "商场目录；设置后下载只生成提案，不把插件标成已安装")
 		showVersion = flag.Bool("version", false, "打印版本号")
 	)
 	flag.Parse()
@@ -39,6 +42,15 @@ func main() {
 	}
 
 	s := &server{startTime: time.Now()}
+	if *dataDir != "" {
+		opened, err := marketplace.Open(*dataDir)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "[plugin_marketplace] 打开目录失败: %v\n", err)
+			os.Exit(1)
+		}
+		s.svc = opened
+		fmt.Printf("[plugin_marketplace] 目录 %s\n", *dataDir)
+	}
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
@@ -96,6 +108,15 @@ func (s *server) handleHealthz(w http.ResponseWriter, _ *http.Request) {
 }
 
 func (s *server) handleSearch(w http.ResponseWriter, r *http.Request) {
+	if s.svc != nil {
+		hits, err := s.svc.Search(r.URL.Query().Get("q"))
+		if err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"plugins": hits, "count": len(hits)})
+		return
+	}
 	q := strings.ToLower(r.URL.Query().Get("q"))
 	catalog := []map[string]any{
 		{
@@ -188,6 +209,34 @@ func (s *server) handleDownload(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "plugin_id 不能为空")
 		return
 	}
+	if s.svc != nil {
+		prop, err := s.svc.Download(req.PluginID, req.Digest)
+		if err != nil {
+			writeJSON(w, http.StatusBadRequest, map[string]any{
+				"stage":           "download",
+				"plugin_id":       req.PluginID,
+				"installed":       false,
+				"process_started": false,
+				"error":           err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"stage":             "download",
+			"plugin_id":         prop.PluginID,
+			"proposal_id":       prop.ProposalID,
+			"digest_ok":         true,
+			"artifact_digest":   prop.ArtifactDigest,
+			"manifest_checksum": prop.ManifestChecksum,
+			"manifest":          prop.Manifest,
+			"depth":             prop.Depth,
+			"dependencies":      prop.Dependencies,
+			"installed":         false,
+			"process_started":   false,
+			"status":            prop.Status,
+		})
+		return
+	}
 
 	// 阶段一验证：SHA256 完整性强校验与 DAG 深度合规
 	writeJSON(w, http.StatusOK, map[string]any{
@@ -207,6 +256,23 @@ func (s *server) handleInstall(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PluginID == "" {
 		writeErr(w, http.StatusBadRequest, "plugin_id 不能为空")
+		return
+	}
+	if s.svc != nil {
+		prop, err := s.svc.RejectInstall(req.PluginID)
+		code := http.StatusConflict
+		if err != nil && strings.Contains(err.Error(), "尚未生成安装提案") {
+			code = http.StatusBadRequest
+		}
+		writeJSON(w, code, map[string]any{
+			"stage":             "install",
+			"plugin_id":         req.PluginID,
+			"proposal_id":       prop.ProposalID,
+			"installed":         false,
+			"process_started":   false,
+			"requires_checksum": true,
+			"error":             err.Error(),
+		})
 		return
 	}
 
@@ -235,6 +301,30 @@ func (s *server) handleUninstall(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || req.PluginID == "" {
 		writeErr(w, http.StatusBadRequest, "plugin_id 不能为空")
+		return
+	}
+	if s.svc != nil {
+		order, err := s.svc.PlanUninstall(req.PluginID, req.Cascade)
+		if err != nil {
+			writeJSON(w, http.StatusConflict, map[string]any{
+				"stage":           "uninstall",
+				"plugin_id":       req.PluginID,
+				"cascade":         req.Cascade,
+				"installed":       true,
+				"process_started": false,
+				"error":           err.Error(),
+			})
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{
+			"stage":           "uninstall",
+			"plugin_id":       req.PluginID,
+			"cascade":         req.Cascade,
+			"order":           order,
+			"status":          "proposal",
+			"installed":       false,
+			"process_started": false,
+		})
 		return
 	}
 

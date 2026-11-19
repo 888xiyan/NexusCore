@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
+## [Unreleased] - 2026-11-19 · M14 下载、安装与卸载审批
+
+### 商场只提交提案
+
+- `plugin_marketplace -data` 用一句话检索目录，并展示依赖、深度、是否有环、摘要是否匹配。目录项不是已安装插件。
+- 下载校验制品 SHA-256，拒绝循环依赖和深度大于 2。通过后只把安装提案写入商场目录，不拉起进程，也不写入 `kernel_plugins`。
+- 商场的安装入口不能把插件标成已安装。批准仍走 `plugin install` 与 `security-approve`：`security_bot` 预审保持待批，`user_bot` 须在交互终端出示一致的 checksum。
+- 仍被依赖时单点卸载被拒绝。`--cascade` 按逆拓扑先停依赖方，每个插件先停 L2 再停 L1。
+- 下载成败写入既有 `kernel_config_audit`，动作是 `download`。不新建审计表。Hub 设置 `-marketplace-url` 后只转发检索与下载。
+- 不带 `-data` 的内置目录仍只给 `make smoke-m10`。回归：`make smoke-m14`。
+
 ## [Unreleased] - 2026-11-19 · M13 沙箱、搜索通知与探针绑定
 
 ### 默认离线与搜索外联

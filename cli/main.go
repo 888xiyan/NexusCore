@@ -203,7 +203,10 @@ func main() {
 
 	// M2: security CLI 契约 (BotMvp §7.3)
 	case "security-list", "security-approve", "security-revoke":
-		if err := handleSecurity(ctx, httpBase, cred, cmd, filteredArgs); err != nil {
+		if err := handleSecurity(ctx, httpBase, cred, cmd, filteredArgs, configInteraction{
+			input: os.Stdin, output: os.Stderr,
+			isTerminal: func() bool { return isTerminal(os.Stdin) },
+		}); err != nil {
 			fmt.Fprintln(os.Stderr, "security 错误:", err)
 			os.Exit(1)
 		}
@@ -268,6 +271,7 @@ func usage() {
 
 【M2: 插件运营与进程控制】
   plugin install <manifest.json>
+  plugin download-record <plugin_id> --digest <sha256> --result ok|rejected [--reason "..."]
   plugin list
   plugin lifecycle <plugin_id>
   plugin upgrade <manifest.json>
@@ -278,7 +282,7 @@ func usage() {
   plugin start <plugin_id>
   plugin kill <plugin_id> --confirm [--reason "..."]
   security-list [pending]
-  security-approve <decision_id>
+  security-approve <decision_id> [--checksum <sha256>]
   security-revoke <decision_id> --reason "..."
 
 【M2: DLQ 运营】
@@ -696,7 +700,7 @@ func handleCreateBot(ctx context.Context, httpBase, cred string, args []string) 
 
 func handlePlugin(ctx context.Context, httpBase, cred string, args []string) error {
 	if len(args) == 0 {
-		return errors.New("缺少 plugin 子命令 (install, list, lifecycle, upgrade, disable, uninstall, ps, stop, start, kill)")
+		return errors.New("缺少 plugin 子命令 (install, download-record, list, lifecycle, upgrade, disable, uninstall, ps, stop, start, kill)")
 	}
 	sub := args[0]
 	rest := args[1:]
@@ -711,6 +715,32 @@ func handlePlugin(ctx context.Context, httpBase, cred string, args []string) err
 			return fmt.Errorf("读取插件清单: %w", err)
 		}
 		return doPost(ctx, httpBase+"/v1/plugins/install", cred, data)
+
+	case "download-record":
+		if len(rest) == 0 {
+			return errors.New("用法: plugin download-record <plugin_id> --digest <sha256> --result ok|rejected [--reason \"...\"]")
+		}
+		pluginID := rest[0]
+		fs := flag.NewFlagSet("plugin download-record", flag.ContinueOnError)
+		digest := fs.String("digest", "", "制品 SHA-256")
+		result := fs.String("result", "", "ok 或 rejected")
+		reason := fs.String("reason", "", "拒绝或提案说明")
+		if err := fs.Parse(rest[1:]); err != nil {
+			return err
+		}
+		if *digest == "" || *result == "" {
+			return errors.New("plugin download-record 需要 --digest 与 --result")
+		}
+		body, err := json.Marshal(map[string]string{
+			"plugin_id": pluginID,
+			"digest":    *digest,
+			"result":    *result,
+			"reason":    *reason,
+		})
+		if err != nil {
+			return err
+		}
+		return doPost(ctx, httpBase+"/v1/plugins/download-audit", cred, body)
 
 	case "list":
 		return doGet(ctx, httpBase+"/v1/plugins", cred)
@@ -745,10 +775,13 @@ func handlePlugin(ctx context.Context, httpBase, cred string, args []string) err
 		fs := flag.NewFlagSet("plugin uninstall", flag.ExitOnError)
 		confirm := fs.Bool("confirm", false, "清理元数据与表")
 		keep := fs.Bool("keep", false, "保留类型化表")
+		cascade := fs.Bool("cascade", false, "按逆拓扑先停依赖方，再停当前插件")
 		_ = fs.Parse(rest[1:])
-		return postPluginControl(ctx, httpBase+"/v1/plugins/"+pluginID+"/uninstall", cred, map[string]any{
-			"confirm": *confirm, "keep": *keep,
-		})
+		fields := map[string]any{"confirm": *confirm, "keep": *keep}
+		if *cascade {
+			fields["cascade"] = true
+		}
+		return postPluginControl(ctx, httpBase+"/v1/plugins/"+pluginID+"/uninstall", cred, fields)
 
 	case "ps":
 		return doGet(ctx, httpBase+"/v1/plugins/processes", cred)
@@ -803,7 +836,53 @@ func postPluginControl(ctx context.Context, url, cred string, fields map[string]
 	return doPost(ctx, url, cred, body)
 }
 
-func handleSecurity(ctx context.Context, httpBase, cred, cmd string, args []string) error {
+func approvePluginInteractive(ctx context.Context, httpBase, cred string, decisionID int64, checksum string, ui configInteraction) error {
+	data, err := getAndReturn(ctx, httpBase+"/v1/plugins/security?status=pending", cred)
+	if err != nil {
+		return fmt.Errorf("读取待审决定失败: %w", err)
+	}
+	var decisions []struct {
+		DecisionID int64  `json:"decision_id"`
+		Checksum   string `json:"checksum"`
+		DecidedBy  string `json:"decided_by"`
+	}
+	if err := json.Unmarshal(data, &decisions); err != nil {
+		return fmt.Errorf("解析待审决定: %w", err)
+	}
+	var bound string
+	for _, d := range decisions {
+		if d.DecisionID == decisionID {
+			bound = d.Checksum
+			break
+		}
+	}
+	if bound == "" || bound != checksum {
+		return errors.New("提供的 checksum 与 security 审查绑定不一致，拒绝批准")
+	}
+	if err := ui.requireTerminal(); err != nil {
+		return err
+	}
+	if _, err := fmt.Fprintf(ui.output, "插件安装审查: %d\nchecksum（前 12 位）: %.12s\n预审: security_bot\n输入 yes 并回车以批准，其他输入取消: ", decisionID, checksum); err != nil {
+		return fmt.Errorf("显示批准确认: %w", err)
+	}
+	answer, err := bufio.NewReader(ui.input).ReadString('\n')
+	if err != nil {
+		return fmt.Errorf("读取批准确认失败，未批准: %w", err)
+	}
+	if strings.TrimSpace(answer) != "yes" {
+		return errors.New("用户取消，未批准插件安装")
+	}
+	body, _ := json.Marshal(map[string]any{
+		"decision_id": decisionID,
+		"checksum":    checksum,
+	})
+	if err := doPost(ctx, httpBase+"/v1/plugins/security/approve", cred, body); err != nil {
+		return fmt.Errorf("批准失败: %w", err)
+	}
+	return nil
+}
+
+func handleSecurity(ctx context.Context, httpBase, cred, cmd string, args []string, ui configInteraction) error {
 	switch cmd {
 	case "security-list":
 		status := ""
@@ -818,13 +897,28 @@ func handleSecurity(ctx context.Context, httpBase, cred, cmd string, args []stri
 
 	case "security-approve":
 		if len(args) == 0 {
-			return errors.New("用法: security-approve <decision_id>")
+			return errors.New("用法: security-approve <decision_id> [--checksum <sha256>]")
 		}
 		id, err := strconv.ParseInt(args[0], 10, 64)
 		if err != nil {
 			return errors.New("decision_id 必须是整数")
 		}
-		body, _ := json.Marshal(map[string]int64{"decision_id": id})
+		fs := flag.NewFlagSet("security-approve", flag.ContinueOnError)
+		csum := fs.String("checksum", "", "审查绑定的清单 sha256")
+		if err := fs.Parse(args[1:]); err != nil {
+			return err
+		}
+		if fs.NArg() != 0 {
+			return errors.New("security-approve 不接受额外参数或 --yes 跳过确认")
+		}
+		payload := map[string]any{"decision_id": id}
+		if *csum != "" {
+			if err := approvePluginInteractive(ctx, httpBase, cred, id, *csum, ui); err != nil {
+				return err
+			}
+			return nil
+		}
+		body, _ := json.Marshal(payload)
 		return doPost(ctx, httpBase+"/v1/plugins/security/approve", cred, body)
 
 	case "security-revoke":

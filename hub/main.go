@@ -36,16 +36,17 @@ import (
 
 func main() {
 	var (
-		showVersion   = flag.Bool("version", false, "打印版本号")
-		httpAddr      = flag.String("listen-http", "127.0.0.1:7100", "HTTP 入口与 /metrics 监听地址")
-		grpcAddr      = flag.String("listen-grpc", "127.0.0.1:7101", "BotRuntime gRPC 监听地址")
-		transportAddr = flag.String("listen-transport", "127.0.0.1:7102", "传输路由监听地址")
-		insecureLocal = flag.Bool("insecure-local", true, "MVP 仅回环 trust（生产需 mTLS）")
-		credFile      = flag.String("user-credential-file", "data/user_bot.cred", "user_bot 凭证输出文件")
-		botBinary     = flag.String("bot-binary", "bin/bot-runtime", "M1 夹具 Bot 二进制路径")
-		toolCenterURL = flag.String("tool-center-url", "", "工具插件地址；设置后工具读写转发到插件，Hub 不保存正文")
-		reconcile     = flag.Duration("reconcile-interval", 2*time.Second, "supervisor reconcile 周期")
-		wakeupPoll    = flag.Duration("wakeup-poll", 5*time.Second, "队列兜底轮询间隔（通知丢失不影响正确性）")
+		showVersion    = flag.Bool("version", false, "打印版本号")
+		httpAddr       = flag.String("listen-http", "127.0.0.1:7100", "HTTP 入口与 /metrics 监听地址")
+		grpcAddr       = flag.String("listen-grpc", "127.0.0.1:7101", "BotRuntime gRPC 监听地址")
+		transportAddr  = flag.String("listen-transport", "127.0.0.1:7102", "传输路由监听地址")
+		insecureLocal  = flag.Bool("insecure-local", true, "MVP 仅回环 trust（生产需 mTLS）")
+		credFile       = flag.String("user-credential-file", "data/user_bot.cred", "user_bot 凭证输出文件")
+		botBinary      = flag.String("bot-binary", "bin/bot-runtime", "M1 夹具 Bot 二进制路径")
+		toolCenterURL  = flag.String("tool-center-url", "", "工具插件地址；设置后工具读写转发到插件，Hub 不保存正文")
+		marketplaceURL = flag.String("marketplace-url", "", "商场插件地址；设置后检索与下载转发到插件，Hub 不保存目录")
+		reconcile      = flag.Duration("reconcile-interval", 2*time.Second, "supervisor reconcile 周期")
+		wakeupPoll     = flag.Duration("wakeup-poll", 5*time.Second, "队列兜底轮询间隔（通知丢失不影响正确性）")
 	)
 	flag.Parse()
 	if *showVersion {
@@ -62,7 +63,7 @@ func main() {
 
 	if err := run(ctx, options{
 		httpAddr: *httpAddr, grpcAddr: *grpcAddr, transportAddr: *transportAddr,
-		credFile: *credFile, botBinary: *botBinary, toolCenterURL: *toolCenterURL, reconcile: *reconcile, wakeupPoll: *wakeupPoll,
+		credFile: *credFile, botBinary: *botBinary, toolCenterURL: *toolCenterURL, marketplaceURL: *marketplaceURL, reconcile: *reconcile, wakeupPoll: *wakeupPoll,
 	}); err != nil && ctx.Err() == nil {
 		fmt.Fprintln(os.Stderr, "hub 退出:", err)
 		os.Exit(1)
@@ -70,14 +71,15 @@ func main() {
 }
 
 type options struct {
-	httpAddr      string
-	grpcAddr      string
-	transportAddr string
-	credFile      string
-	botBinary     string
-	toolCenterURL string
-	reconcile     time.Duration
-	wakeupPoll    time.Duration
+	httpAddr       string
+	grpcAddr       string
+	transportAddr  string
+	credFile       string
+	botBinary      string
+	toolCenterURL  string
+	marketplaceURL string
+	reconcile      time.Duration
+	wakeupPoll     time.Duration
 }
 
 func run(ctx context.Context, opt options) error {
@@ -137,6 +139,9 @@ func run(ctx context.Context, opt options) error {
 	api := httpapi.New(st, reg, ing, sched, cfg, disp, router)
 	if opt.toolCenterURL != "" {
 		api.SetToolCenterUpstream(opt.toolCenterURL)
+	}
+	if opt.marketplaceURL != "" {
+		api.SetMarketplaceUpstream(opt.marketplaceURL)
 	}
 	api.SetPluginManager(pm)
 	api.SetSupervisor(sup)

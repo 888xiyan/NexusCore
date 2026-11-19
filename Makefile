@@ -1,7 +1,7 @@
 BIN_DIR := bin
 PLUGIN_BIN_DIR := bin/plugins
 
-.PHONY: build build-frontend build-all build-plugins test test-pg vet fmt proto migrate-probe migrate-up migrate-down compose-up compose-down smoke-empty smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-m8 smoke-m9 smoke-m10 smoke-m11 smoke-m12 smoke-m13 launch-m4 drill-crash-m1 clean
+.PHONY: build build-frontend build-all build-plugins test test-pg vet fmt proto migrate-probe migrate-up migrate-down compose-up compose-down smoke-empty smoke-m1 smoke-m2 smoke-m3 smoke-m4 smoke-m5 smoke-m6 smoke-m7 smoke-m8 smoke-m9 smoke-m10 smoke-m11 smoke-m12 smoke-m13 smoke-m14 launch-m4 drill-crash-m1 clean
 
 build-frontend:
 	@echo "==> 构建前端生产产物..."
@@ -154,6 +154,10 @@ smoke-m12:
 # M13 验收：默认离线、搜索 DNS/HTTPS 通知 user_bot、未绑定探针不能派发 CLI
 smoke-m13:
 	@./scripts/smoke-m13.sh
+
+# M14 验收：下载只生成提案；安装仍由 user_bot 按 checksum 批准；被依赖时拒绝单点卸载
+smoke-m14:
+	@./scripts/smoke-m14.sh
 
 # M4 实机启动：一键启动微内核网关、群聊插件、受控探针与 Vue 3 前端工作台
 launch-m4:

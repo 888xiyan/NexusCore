@@ -182,11 +182,12 @@ hub 的 `LISTEN` 使用专用直连，不能经过 PgBouncer 的 transaction poo
 | M7 前端微模块化与插件注册表 | 已完成 | 方案 A（Vite ESM 动态导入）：宿主纯净 Shell 骨架（100% 剥离业务硬编码）+ 插件注册表（PluginRegistry）、UI 契约与运行时共享规范（`window.__NEXUS_CORE__`）、微模块独立代码分割（GroupChat / Agent Discovery / Bot Creator）与端到端自动化冒烟（`make smoke-m7`）全链路通过 |
 | M8 基础模块沉淀与依赖治理 | 已完成 | 核心能力下沉无头化（100% 剥离 UI，涵盖 GroupChat、AgentMesh、BotFactory），单测覆盖率全量 ≥ 85%；能力契约入配置中心（SemVer），业务插件清单声明依赖；内核 DAG 拓扑排序加载（Kahn 算法）；环路静态检测（三色标记 DFS）+ 依赖深度硬限制（Max Depth ≤ 2）+ 逆序安全级联卸载 + 两阶段平滑滚动热更新；端到端自动化验收 `make smoke-m8` 10 步全链路通过 |
 | M9 全局 UI 原型、标准群聊与沙盒轨迹 | 演示完成（v0.1.0） | `make smoke-m9` 通过。默认离线已由 M13 验收；入群过滤与纪事真实数据留在 M16 |
-| M10 工具中心与中台代批 | 演示完成（v0.2.0） | `make smoke-m10` 通过。工具持久化已由 M12 验收；checksum 安装与代批身份核对留在 M14 / M15 |
+| M10 工具中心与中台代批 | 演示完成（v0.2.0） | `make smoke-m10` 通过。工具持久化已由 M12 验收；checksum 安装已由 M14 验收；代批身份核对留在 M15 |
 | M11 身份与安装留底 | 已合入（`7624be4`） | `plugin_category`、Bot 身份可列举、安装/升级/停用/卸载成败写入 `kernel_config_audit`。`plugin_type` CHECK 未改。回归 `make smoke-m11` |
 | M12 工具持久化与授权 | 已验收 | `plugin_tool_center` 自有目录保存 Skill / MCP 登记 / 授权；搜索默认强绑。回归 `make smoke-m12` |
 | M13 沙箱、搜索通知与 Agent 绑定 | 已验收 | 默认离线；已授权搜索走 DNS/HTTPS 并通知 `user_bot`；未绑定探针不能派发 CLI。回归 `make smoke-m13` |
-| M14–M17 需求规格补齐 | 未开工 | 下载审批、中台助手、设置与纪事、业务插件接入标准 |
+| M14 下载安装卸载审批 | 已验收 | 下载只生成提案；`user_bot` 按 checksum 批准后才安装；被依赖时拒绝单点卸载。回归 `make smoke-m14` |
+| M15–M17 需求规格补齐 | 未开工 | 中台助手、设置与纪事、业务插件接入标准 |
 | M18 业务插件 / M19 模型路由 | 规格定稿，待实现 | 见 `doc/milestones/M18-业务插件需求规格.md` 与 `M19-模型与执行路由.md` |
 
 ## 常见禁忌（先问用户再做）

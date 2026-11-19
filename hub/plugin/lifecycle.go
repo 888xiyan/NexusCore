@@ -127,7 +127,7 @@ func (m *Manager) pluginCategory(ctx context.Context, pluginID string) (string, 
 
 func normalizeLifecycle(rec *LifecycleRecord) error {
 	switch rec.Action {
-	case "install", "upgrade", "disable", "uninstall":
+	case "install", "upgrade", "disable", "uninstall", "download":
 	default:
 		return fmt.Errorf("%w: 生命周期动作 %q 非法", ErrInvalidManifest, rec.Action)
 	}
@@ -170,6 +170,8 @@ func insertLifecycle(ctx context.Context, tx pgx.Tx, rec LifecycleRecord) error 
 		switch rec.Action {
 		case "install", "upgrade":
 			toStatus = "installed"
+		case "download":
+			toStatus = "proposed"
 		case "disable":
 			toStatus = "disabled"
 		case "uninstall":
@@ -184,6 +186,28 @@ func insertLifecycle(ctx context.Context, tx pgx.Tx, rec LifecycleRecord) error 
 		return fmt.Errorf("写入生命周期审计: %w", err)
 	}
 	return nil
+}
+
+// RecordDownload 把下载成败写入既有生命周期留底。不修改 kernel_plugins，也不拉起进程。
+func (m *Manager) RecordDownload(ctx context.Context, actor config.Actor, pluginID, digest, result, reason string) error {
+	if err := requireRole(actor, config.UserBot); err != nil {
+		return err
+	}
+	rec := LifecycleRecord{
+		PluginID: pluginID,
+		Action:   "download",
+		Actor:    actor.ID,
+		Digest:   digest,
+		Result:   result,
+		Reason:   reason,
+	}
+	if result != "ok" && result != "rejected" {
+		return fmt.Errorf("%w: 下载结果 %q 非法", ErrInvalidManifest, result)
+	}
+	if pluginID == "" {
+		return fmt.Errorf("%w: plugin_id 不能为空", ErrInvalidManifest)
+	}
+	return m.recordLifecycle(ctx, rec)
 }
 
 // ListLifecycle 按插件读出追加的安装、升级、禁用、卸载留底。
@@ -207,7 +231,7 @@ func (m *Manager) ListLifecycle(ctx context.Context, pluginID string) ([]Lifecyc
 		  FROM kernel_config_audit a
 		  JOIN kernel_config_documents d ON d.doc_id = a.doc_id
 		 WHERE d.scope_type='plugin' AND d.scope_id=$1 AND d.config_key=$2
-		   AND a.action IN ('install','upgrade','disable','uninstall')
+		   AND a.action IN ('install','upgrade','disable','uninstall','download')
 		 ORDER BY a.created_at, a.audit_id`, pluginID, lifecycleConfigKey)
 	if err != nil {
 		return nil, fmt.Errorf("查询生命周期留底: %w", err)
@@ -272,7 +296,7 @@ func checkBinaryDigest(mf *Manifest) error {
 // checkCandidateDepth 只在依赖图能够解析时检查深度。
 // 提供者索引在安装之后才登记，未满足的接口依赖不在安装入口阻断。
 func (m *Manager) checkCandidateDepth(ctx context.Context, mf *Manifest) error {
-	if mf == nil || len(mf.Dependencies) == 0 {
+	if mf == nil || (len(mf.Dependencies) == 0 && len(mf.Deps) == 0) {
 		return nil
 	}
 	plugins := map[string]*Manifest{}

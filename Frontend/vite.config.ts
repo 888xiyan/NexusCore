@@ -38,6 +38,12 @@ export default defineConfig({
           return '/api/tools' + rest
         }
       },
+      // 商场目录在 plugin_marketplace。下载只生成提案，批准仍走 Hub 的 user_bot checksum。
+      '/v1/marketplace': {
+        target: 'http://127.0.0.1:7600',
+        changeOrigin: true,
+        rewrite: (path) => path.replace(/^\/v1\/marketplace/, '/api/marketplace')
+      },
       '/v1': {
         target: 'http://127.0.0.1:7200',
         changeOrigin: true

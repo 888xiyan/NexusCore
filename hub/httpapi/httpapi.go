@@ -95,6 +95,10 @@ type API struct {
 	toolUpstream string
 	toolHTTP     *http.Client
 
+	// 商场目录在插件侧。marketUpstream 非空时检索与下载转发到插件。
+	marketUpstream string
+	marketHTTP     *http.Client
+
 	// FixtureBinder 由 hub 注入，用于 M1 冒烟夹具绑定真实二进制（M2 起由插件 install 取代）
 	FixtureBinder func(ctx context.Context) error
 }
@@ -305,6 +309,7 @@ func (a *API) Handler() http.Handler {
 
 	// M2: 插件生命周期与两级进程 API
 	mux.HandleFunc("POST /v1/plugins/install", a.handlePluginInstall)
+	mux.HandleFunc("POST /v1/plugins/download-audit", a.handleDownloadAudit)
 	mux.HandleFunc("GET /v1/plugins", a.handlePluginList)
 	mux.HandleFunc("GET /v1/plugins/{plugin_id}/lifecycle", a.handlePluginLifecycle)
 	mux.HandleFunc("GET /v1/plugins/security", a.handleSecurityList)
@@ -1368,6 +1373,7 @@ func (a *API) handleSecurityList(w http.ResponseWriter, r *http.Request) {
 
 type securityApproveReq struct {
 	DecisionID     int64  `json:"decision_id"`
+	Checksum       string `json:"checksum"`
 	CorrelationID  string `json:"correlation_id"`
 	CausationID    string `json:"causation_id"`
 	RootEnvelopeID string `json:"root_envelope_id"`
@@ -1404,6 +1410,12 @@ func (a *API) handleSecurityApprove(w http.ResponseWriter, r *http.Request) {
 	}
 	if cc.RootEnvelopeID == "" {
 		cc.RootEnvelopeID = cc.CorrelationID
+	}
+	if req.Checksum != "" {
+		if err := a.pm.VerifyPresentedChecksum(r.Context(), req.DecisionID, req.Checksum); err != nil {
+			writeErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 	if err := a.pm.SecurityApprove(r.Context(), actor, req.DecisionID, cc); err != nil {
 		writeErr(w, http.StatusBadRequest, err.Error())
@@ -1483,6 +1495,7 @@ func (a *API) handlePluginDisable(w http.ResponseWriter, r *http.Request) {
 type pluginUninstallReq struct {
 	Confirm bool `json:"confirm"`
 	Keep    bool `json:"keep"`
+	Cascade bool `json:"cascade"`
 }
 
 func (a *API) handlePluginUninstall(w http.ResponseWriter, r *http.Request) {
@@ -1498,8 +1511,14 @@ func (a *API) handlePluginUninstall(w http.ResponseWriter, r *http.Request) {
 	pluginID := r.PathValue("plugin_id")
 	var req pluginUninstallReq
 	_ = json.NewDecoder(r.Body).Decode(&req)
-	if err := a.pm.Uninstall(r.Context(), actor, pluginID, req.Confirm, req.Keep); err != nil {
-		writeErr(w, http.StatusInternalServerError, err.Error())
+	var errUninstall error
+	if req.Cascade {
+		errUninstall = a.pm.CascadeUninstall(r.Context(), actor, pluginID)
+	} else {
+		errUninstall = a.pm.Uninstall(r.Context(), actor, pluginID, req.Confirm, req.Keep)
+	}
+	if errUninstall != nil {
+		writeErr(w, http.StatusInternalServerError, errUninstall.Error())
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"plugin_id": pluginID, "status": "uninstalled"})
@@ -2248,7 +2267,42 @@ func (a *API) handleDelegationExecute(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+func (a *API) handleDownloadAudit(w http.ResponseWriter, r *http.Request) {
+	actor, err := a.requireUserBot(r)
+	if err != nil {
+		writeErr(w, http.StatusForbidden, err.Error())
+		return
+	}
+	if a.pm == nil {
+		writeErr(w, http.StatusNotImplemented, "plugin manager 未就绪")
+		return
+	}
+	var req struct {
+		PluginID string `json:"plugin_id"`
+		Digest   string `json:"digest"`
+		Result   string `json:"result"`
+		Reason   string `json:"reason"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeErr(w, http.StatusBadRequest, "请求体不是合法 JSON")
+		return
+	}
+	if err := a.pm.RecordDownload(r.Context(), actor, req.PluginID, req.Digest, req.Result, req.Reason); err != nil {
+		writeErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{
+		"plugin_id": req.PluginID,
+		"action":    "download",
+		"result":    req.Result,
+		"installed": false,
+	})
+}
+
 func (a *API) handleMarketplaceSearch(w http.ResponseWriter, r *http.Request) {
+	if a.relayMarketplace(w, r) {
+		return
+	}
 	q := strings.ToLower(r.URL.Query().Get("q"))
 	catalog := []map[string]any{
 		{
@@ -2313,6 +2367,9 @@ func (a *API) handleMarketplaceSearch(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleMarketplaceDownload(w http.ResponseWriter, r *http.Request) {
+	if a.relayMarketplace(w, r) {
+		return
+	}
 	var req struct {
 		PluginID string `json:"plugin_id"`
 		Digest   string `json:"digest"`
@@ -2333,6 +2390,9 @@ func (a *API) handleMarketplaceDownload(w http.ResponseWriter, r *http.Request) 
 }
 
 func (a *API) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request) {
+	if a.relayMarketplace(w, r) {
+		return
+	}
 	var req struct {
 		PluginID      string `json:"plugin_id"`
 		UserConfirmed bool   `json:"user_confirmed"`
@@ -2359,6 +2419,9 @@ func (a *API) handleMarketplaceInstall(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *API) handleMarketplaceUninstall(w http.ResponseWriter, r *http.Request) {
+	if a.relayMarketplace(w, r) {
+		return
+	}
 	var req struct {
 		PluginID string `json:"plugin_id"`
 		Cascade  bool   `json:"cascade"`

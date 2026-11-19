@@ -100,6 +100,7 @@ type SecurityDecision struct {
 	RequestedBy string    `json:"requested_by"`
 	DecidedBy   string    `json:"decided_by"`
 	Reason      string    `json:"reason,omitempty"`
+	Checksum    string    `json:"checksum,omitempty"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`
 }
@@ -172,18 +173,40 @@ func (m *Manager) ProviderIndex() *InterfaceProviderIndex {
 	return m.providerIndex
 }
 
-// BuildSystemDAG 收集当前已激活插件并生成全局依赖 DAG
+// BuildSystemDAG 收集当前已安装或已启用的插件并生成全局依赖 DAG。
+// 数据库模式下从 kernel_plugins 读取清单，供卸载时的反向依赖判断使用。
 func (m *Manager) BuildSystemDAG() (*DependencyDAG, error) {
-	m.lifecycleMu.Lock()
-	defer m.lifecycleMu.Unlock()
-
 	activePlugins := make(map[string]*Manifest)
-	if m.st == nil {
+	if m.st != nil && m.st.Pool() != nil {
+		rows, err := m.st.Pool().Query(context.Background(), `
+			SELECT manifest_json FROM kernel_plugins
+			 WHERE status IN ('installed','enabled')`)
+		if err != nil {
+			return nil, fmt.Errorf("读取已安装清单: %w", err)
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var raw []byte
+			if err := rows.Scan(&raw); err != nil {
+				return nil, err
+			}
+			var mf Manifest
+			if err := json.Unmarshal(raw, &mf); err != nil || mf.PluginID == "" {
+				continue
+			}
+			activePlugins[mf.PluginID] = &mf
+		}
+		if err := rows.Err(); err != nil {
+			return nil, err
+		}
+	} else {
+		m.lifecycleMu.Lock()
 		for pID, mf := range m.memPlugins {
 			if m.memStatuses[pID] == "enabled" || m.memStatuses[pID] == "installed" {
 				activePlugins[pID] = mf
 			}
 		}
+		m.lifecycleMu.Unlock()
 	}
 	provMap := make(map[string]string)
 	if m.providerIndex != nil {
@@ -333,6 +356,7 @@ func (m *Manager) Install(ctx context.Context, actor config.Actor, raw []byte) (
 			RequestedBy: actor.ID,
 			DecidedBy:   "security_bot",
 			Reason:      digest,
+			Checksum:    digest,
 		})
 		base.Result = "ok"
 		base.Reason = "已提交 security 审查"
@@ -394,7 +418,7 @@ func (m *Manager) SecurityList(ctx context.Context, actor config.Actor, status s
 		}
 		return out, nil
 	}
-	q := `SELECT decision_id, subject_type, subject_id, action, decision, requested_by, decided_by, COALESCE(reason, ''), created_at, updated_at
+	q := `SELECT decision_id, subject_type, subject_id, action, decision, requested_by, decided_by, COALESCE(reason, ''), COALESCE(checksum, ''), created_at, updated_at
 	        FROM kernel_security_decisions`
 	var args []any
 	if status != "" {
@@ -412,7 +436,7 @@ func (m *Manager) SecurityList(ctx context.Context, actor config.Actor, status s
 	var out []SecurityDecision
 	for rows.Next() {
 		var d SecurityDecision
-		if err := rows.Scan(&d.DecisionID, &d.SubjectType, &d.SubjectID, &d.Action, &d.Decision, &d.RequestedBy, &d.DecidedBy, &d.Reason, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		if err := rows.Scan(&d.DecisionID, &d.SubjectType, &d.SubjectID, &d.Action, &d.Decision, &d.RequestedBy, &d.DecidedBy, &d.Reason, &d.Checksum, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, d)
@@ -803,6 +827,79 @@ func (m *Manager) Uninstall(ctx context.Context, actor config.Actor, pluginID st
 	}
 	base.Result = "ok"
 	return m.recordLifecycle(ctx, base)
+}
+
+// CascadeUninstall 按逆拓扑卸载：每个插件先停 L2，再停 L1。
+func (m *Manager) CascadeUninstall(ctx context.Context, actor config.Actor, pluginID string) error {
+	base := LifecycleRecord{PluginID: pluginID, Action: "uninstall", Actor: actor.ID}
+	if err := requireRole(actor, config.UserBot); err != nil {
+		return m.failLifecycle(ctx, base, err)
+	}
+	order, err := m.uninstallSequence(pluginID, true)
+	if err != nil {
+		return m.failLifecycle(ctx, base, err)
+	}
+	for _, id := range order {
+		if err := m.Uninstall(ctx, actor, id, true, false); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (m *Manager) uninstallSequence(pluginID string, cascade bool) ([]string, error) {
+	dag, err := m.BuildSystemDAG()
+	if err != nil || dag == nil {
+		if err != nil {
+			return nil, err
+		}
+		return []string{pluginID}, nil
+	}
+	if _, ok := dag.Nodes[pluginID]; !ok {
+		return []string{pluginID}, nil
+	}
+	return CheckUninstallReverseDependencies(dag, pluginID, cascade)
+}
+
+// DecisionChecksum 返回安全审查绑定的清单 checksum。
+func (m *Manager) DecisionChecksum(ctx context.Context, decisionID int64) (string, error) {
+	if m.st == nil {
+		m.lifecycleMu.Lock()
+		defer m.lifecycleMu.Unlock()
+		for _, d := range m.memDecisions {
+			if d.DecisionID == decisionID {
+				if d.Checksum != "" {
+					return d.Checksum, nil
+				}
+				return d.Reason, nil
+			}
+		}
+		return "", ErrDecisionNotFound
+	}
+	var sum string
+	err := m.st.Pool().QueryRow(ctx, `SELECT COALESCE(checksum,'') FROM kernel_security_decisions WHERE decision_id=$1`, decisionID).Scan(&sum)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", ErrDecisionNotFound
+		}
+		return "", fmt.Errorf("读取审查 checksum: %w", err)
+	}
+	return sum, nil
+}
+
+// VerifyPresentedChecksum 要求调用方出示与审查绑定一致的 checksum。
+func (m *Manager) VerifyPresentedChecksum(ctx context.Context, decisionID int64, checksum string) error {
+	if checksum == "" {
+		return fmt.Errorf("%w: 批准必须提供 checksum", config.ErrForbidden)
+	}
+	got, err := m.DecisionChecksum(ctx, decisionID)
+	if err != nil {
+		return err
+	}
+	if got == "" || got != checksum {
+		return fmt.Errorf("%w: checksum 与审查绑定不一致", config.ErrConflict)
+	}
+	return nil
 }
 
 // Upgrade 提交插件升级审查。
